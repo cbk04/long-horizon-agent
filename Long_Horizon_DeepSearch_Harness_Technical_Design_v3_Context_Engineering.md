@@ -6,7 +6,7 @@
 
 ## 1. 背景与目标
 Long-Horizon DeepSearch 与普通问答 Agent 的区别，不只是推理更复杂，而是任务可能持续数十分钟甚至数小时，需要多轮搜索、网页阅读、证据抽取、问题分解、验证、重新搜索和最终综合。执行过程中还会出现 LLM/工具失败、Worker 崩溃、用户断线、上下文膨胀和预算超限。
-因此本项目不以“再实现一个 ReAct Agent”为目标，而是构建一个 Long-Horizon Task Runtime，并使用 LangGraph 承担 Agent 的图状态与 ReAct 执行循环，再用 Middleware 将 Context、Evaluation、Budget、Guardrail、Tracing 等横切能力解耦。
+因此本项目不以"再实现一个 ReAct Agent"为目标，而是构建一个 Long-Horizon Task Runtime，并使用 LangGraph 承担 Agent 的图状态与 ReAct 执行循环，再用 Middleware 将 Context、Evaluation、Budget、Guardrail、Tracing 等横切能力解耦。
 ### 核心目标
 - 任务与 HTTP 请求解耦，可异步持续运行。
 - Worker 崩溃/进程重启后可从 checkpoint 恢复。
@@ -62,7 +62,7 @@ LangGraph Checkpointer: graph state
 
 
 ## 3. 为什么 Context / Eval 做成 Middleware
-这样 ReAct 主循环只负责“根据当前状态决定下一步动作”，而上下文管理和质量控制成为可插拔能力。未来可以替换 Context 策略或 Evaluator，而不修改 Agent loop。
+这样 ReAct 主循环只负责"根据当前状态决定下一步动作"，而上下文管理和质量控制成为可插拔能力。未来可以替换 Context 策略或 Evaluator，而不修改 Agent loop。
 ```
 before_model:
     relevant_evidence = retrieve_relevant_evidence(goal, current_question)
@@ -410,14 +410,14 @@ Worker 崩溃
 - Agent 决定下一步做什么；Harness 决定任务如何可靠地活着。
 - LangGraph 管一次 Agent Run 的图状态和执行循环；Middleware 管 Agent 内横切能力。
 - MySQL 管 durable task metadata；LangGraph checkpoint 管 graph state；Redis 管实时事件与租约；Object Storage 管大对象。
-- Evaluation 不直接替代 Agent 决策，而是结构化回答“做得够不够、还缺什么”，由 ReAct 自己决定下一步。
-- MVP 的成功标准不是“回答得像 Agent”，而是“任务可以长时间运行、失败后恢复、证据可追踪、质量可验证”。
+- Evaluation 不直接替代 Agent 决策，而是结构化回答"做得够不够、还缺什么"，由 ReAct 自己决定下一步。
+- MVP 的成功标准不是"回答得像 Agent"，而是"任务可以长时间运行、失败后恢复、证据可追踪、质量可验证"。
 
 Long-Horizon Context Engineering
 上下文分层、压缩、注入与长期任务注意力保持设计
 ## 16. Context Engineering：Long-Horizon 的核心基础设施
-对于 Long-Horizon Agent，Context Management 不是简单的“历史消息截断”或“做一个 Summary”。任务持续几十分钟甚至数小时后，Agent 面临的核心问题是：当前窗口有限，但任务状态、研究发现、证据、失败尝试、未解决问题和历史决策不断增长。如果把所有历史直接塞给模型，会产生上下文膨胀、信息稀释、旧信息干扰和注意力漂移；如果过度压缩，又会丢失当前任务所必需的事实。
-因此本系统将 Context 设计为一个独立 Middleware，并采用“分层存储 + 按需检索 + 动态压缩 + 每步重建 Context”的策略。Agent 每次调用模型时都不是简单读取上一轮 messages，而是由 Context Middleware 根据当前 Phase、目标、未解决问题、最近动作和相关 Evidence 动态构造 Working Context。
+对于 Long-Horizon Agent，Context Management 不是简单的"历史消息截断"或"做一个 Summary"。任务持续几十分钟甚至数小时后，Agent 面临的核心问题是：当前窗口有限，但任务状态、研究发现、证据、失败尝试、未解决问题和历史决策不断增长。如果把所有历史直接塞给模型，会产生上下文膨胀、信息稀释、旧信息干扰和注意力漂移；如果过度压缩，又会丢失当前任务所必需的事实。
+因此本系统将 Context 设计为一个独立 Middleware，并采用"分层存储 + 按需检索 + 动态压缩 + 每步重建 Context"的策略。Agent 每次调用模型时都不是简单读取上一轮 messages，而是由 Context Middleware 根据当前 Phase、目标、未解决问题、最近动作和相关 Evidence 动态构造 Working Context。
 ### 16.1 Context 的五层模型
 ```
                     LLM Working Context
@@ -448,53 +448,64 @@ Long-Horizon Context Engineering
 | L4 Archive | 完整历史消息、原始网页、Artifact、旧版本 Summary | 长期 | 否，按需召回 |
 
 
-核心原则：数据库/存储层保存完整事实，LLM Context 只保存当前决策所需的信息。因此不能把“Context”理解成一个不断增长的字符串，而应该理解成一个由多种 Memory 组成的动态视图。
+核心原则：数据库/存储层保存完整事实，LLM Context 只保存当前决策所需的信息。因此不能把"Context"理解成一个不断增长的字符串，而应该理解成一个由多种 Memory 组成的动态视图。
 ### 16.2 每次 Agent 调用到底传什么
-一次 Model Call 的 Context Builder 建议按照以下顺序构造：
+一次 Model Call 的 Context Builder 按照**变化频率从低到高**的顺序构造，使 prompt 前缀尽可能稳定，最大化 LLM Provider 的 prompt cache 命中率：
 ```
-1. System / Agent Policy
-2. Task Brief
-   - original goal
-   - success criteria
-   - constraints
-3. Current Research State
-   - current phase
-   - current sub-question
-   - progress
-   - unresolved gaps
-4. Research Plan
-   - completed items
-   - current item
-   - next candidate items
-5. Working Memory
-   - phase summary
-   - important findings
-   - key decisions
-   - failed approaches
-6. Relevant Evidence
-   - top-K claims/evidence/source
-   - contradiction signals
-7. Recent Interaction
-   - recent messages
-   - latest tool calls/results
-8. Current Action Context
-   - why previous action happened
-   - what information it produced
-   - what needs to be decided now
-9. Budget / Runtime State
-   - remaining time
-   - remaining tool calls
-   - estimated cost
-10. Evaluation Feedback
-   - missing information
-   - coverage gaps
-   - evidence quality warnings
+┌─────────────────────────────────────────────────────────┐
+│  Stable Prefix（跨步不变，cache-friendly）              │
+│                                                         │
+│  1. System / Agent Policy              ← 永不变         │
+│  2. Task Brief (Stable Part)           ← 任务期间不变   │
+│     - original goal                                     │
+│     - success criteria                                  │
+│     - constraints                                       │
+│  3. Research Plan (Snapshot)           ← 仅 plan 更新时变│
+│     - completed items                                   │
+│     - current item                                      │
+│     - next candidate items                              │
+│  4. Working Memory (Snapshot)          ← 仅压缩时变     │
+│     - phase summary                                     │
+│     - important findings                                │
+│     - key decisions                                     │
+│     - failed approaches                                 │
+│  5. Relevant Evidence (Cached)         ← 仅 question 变时变│
+│     - top-K claims/evidence/source                     │
+│     - contradiction signals                             │
+│                                                         │
+│  ──────────── cache breakpoint ────────────             │
+│                                                         │
+│  Dynamic Suffix（每步可能变化）                         │
+│                                                         │
+│  6. Current Phase                      ← 低频，phase 转换时变│
+│  7. Current Sub-question               ← 每步可能变     │
+│  8. Progress + Unresolved Gaps         ← 每步变         │
+│  9. Recent Interaction                 ← 每步必变       │
+│     - recent messages                                   │
+│     - latest tool calls/results                         │
+│ 10. Current Action Context             ← 每步变         │
+│     - why previous action happened                      │
+│     - what information it produced                      │
+│     - what needs to be decided now                     │
+│ 11. Budget / Runtime State             ← 每步变         │
+│     - remaining time                                    │
+│     - remaining tool calls                              │
+│     - estimated cost                                   │
+│ 12. Evaluation Feedback                ← 每步变         │
+│     - missing information                               │
+│     - coverage gaps                                     │
+│     - evidence quality warnings                         │
+└─────────────────────────────────────────────────────────┘
 ```
-这里最重要的是“当前决策上下文”而不是“历史聊天记录”。模型每次都应该明确知道：我是谁、我要完成什么、已经做到哪里、当前正在解决什么、缺什么、已经知道什么、下一步需要决定什么。
-### 16.3 Task Brief：防止长期任务“忘记目标”
+这里最重要的是"当前决策上下文"而不是"历史聊天记录"。模型每次都应该明确知道：我是谁、我要完成什么、已经做到哪里、当前正在解决什么、缺什么、已经知道什么、下一步需要决定什么。
+
+同时，Context 的组装顺序直接影响 prompt cache 命中率。高频变化的内容放在后面，可以让前面的稳定前缀被 LLM Provider 缓存复用。
+### 16.3 Task Brief：防止长期任务"忘记目标"
 Long-Horizon 中最危险的问题之一不是模型不知道某条历史信息，而是随着大量搜索和工具调用，Agent 逐渐偏离原始目标。因此每次 Model Call 都应该有一个稳定、短小的 Task Brief。
+
+Task Brief 拆分为**稳定部分**和**动态部分**，分别注入 Stable Prefix 和 Dynamic Suffix：
 ```
-Task Brief
+── Task Brief (Stable Part) → 注入 Stable Prefix ──
 Goal:
   比较 A/B/C 三种方案在 Long-Horizon Agent 中的可靠性
 
@@ -505,6 +516,11 @@ Success Criteria:
   4. 至少有官方/一手证据
   5. 给出明确技术选型
 
+Constraints:
+  - 只考虑开源方案
+  - 预算 50k token
+
+── Task Brief (Dynamic Part) → 注入 Dynamic Suffix ──
 Current Phase:
   Research -> Context Management
 
@@ -518,9 +534,11 @@ Unresolved Gaps:
 Next Decision:
   判断是否需要继续搜索，还是进入 synthesis
 ```
-Task Brief 相当于 Agent 的“导航仪”。它不随历史消息无限增长，而是随着任务状态更新保持稳定、明确和高度结构化。
+稳定部分在任务创建后基本不变，可以被 LLM Provider 长期缓存。动态部分每步可能变化，放在 Dynamic Suffix 中不影响前缀缓存。
+
+Task Brief 相当于 Agent 的"导航仪"。它不随历史消息无限增长，而是随着任务状态更新保持稳定、明确和高度结构化。
 ### 16.4 动态压缩，而不是一次性 Summary
-Context Compression 不应该设计成“超过 N token 后，把所有历史总结成一段文字”。这种方式容易把错误、无关内容和已经失效的信息一起压缩进去。推荐采用分层、事件驱动的增量压缩。
+Context Compression 不应该设计成"超过 N token 后，把所有历史总结成一段文字"。这种方式容易把错误、无关内容和已经失效的信息一起压缩进去。推荐采用分层、事件驱动的增量压缩。
 ```
 Recent Messages
       │
@@ -571,7 +589,7 @@ Archive old messages
 }
 ```
 关键事实不应该只存在自然语言 Summary 中，而应尽可能落成结构化 State/Evidence。这样压缩时不会因为语言模型重新总结而把事实关系丢掉。
-### 16.5 Context 的“新鲜度”与版本化
+### 16.5 Context 的"新鲜度"与版本化
 Long-Horizon Task 运行时间长，Context 中存在 stale information 的风险。例如早期判断某个来源可信，后来发现其数据已经过期。因此 Working Memory 中的内容应带有 source、timestamp、phase 和 confidence 等元数据。
 ```
 Finding
@@ -585,7 +603,7 @@ Finding
 └── status: ACTIVE / SUPERSEDED / REJECTED
 ```
 Context Builder 默认优先注入 ACTIVE 且与当前问题相关的内容；SUPERSEDED/REJECTED 信息只在解释历史决策时按需召回。
-### 16.6 相关性检索：不是“全部 Memory 都放进去”
+### 16.6 相关性检索：不是"全部 Memory 都放进去"
 当任务运行到数百个 Step 时，Working Memory 和 Evidence Memory 也会很大。Context Middleware 应根据当前 Sub-question 做检索，而不是把整个任务的 Findings 全部注入。
 ```
 current_question
@@ -601,7 +619,7 @@ current_question
                     ▼
               Top-K Context
 ```
-可以使用“语义相关性 + 当前 Phase + Recency + Evidence Quality + Dependency”综合排序。其中 Recency 不能成为唯一标准，因为长期任务中的稳定核心事实可能很久没有出现，但仍然比最近的一条无关搜索结果重要。
+可以使用"语义相关性 + 当前 Phase + Recency + Evidence Quality + Dependency"综合排序。其中 Recency 不能成为唯一标准，因为长期任务中的稳定核心事实可能很久没有出现，但仍然比最近的一条无关搜索结果重要。
 ### 16.7 注意力预算：把 Context 当成有限资源
 Context Window 很大并不意味着应该把更多信息塞给模型。Long-Horizon Agent 更需要控制每次 Model Call 的 attention budget。
 
@@ -626,25 +644,97 @@ before_model(state):
     2. Determine current phase/question
     3. Check context pressure
     4. Compact recent messages if needed
-    5. Retrieve relevant findings
-    6. Retrieve relevant evidence
-    7. Build Task Brief
-    8. Inject eval feedback
-    9. Apply token budget
-    10. Emit CONTEXT_BUILT event
-    11. Call LLM
+    5. Check cache validity:
+       a. current_question_hash == last_injected_question_hash?
+          -> yes: reuse Working Memory + Evidence block (skip 6-7)
+       b. plan_version == last_injected_plan_version?
+          -> yes: reuse Research Plan block (skip 6)
+       c. working_memory_version == last_injected_wm_version?
+          -> yes: reuse Working Memory block
+    6. Retrieve relevant findings (if question changed or first call)
+    7. Retrieve relevant evidence (if question changed or first call)
+    8. Build Task Brief (stable + dynamic parts)
+    9. Inject eval feedback
+    10. Apply token budget
+    11. Emit CONTEXT_BUILT event (with cache hit/miss stats)
+    12. Call LLM
 
 after_model(result):
     1. Extract important facts/decisions if needed
     2. Update structured state
-    3. Update working memory
-    4. Record context statistics
-    5. Emit CONTEXT_UPDATED event
+    3. Update working memory (bump version if changed)
+    4. Update plan (bump version if changed)
+    5. Record context statistics (including cache hit rate)
+    6. Emit CONTEXT_UPDATED event
 ```
-### 16.9 防止 Context Drift 的机制
+### 16.9 Context Cache Strategy：最大化 prompt cache 命中率
+Long-Horizon Agent 在单个任务中可能产生数百次 LLM 调用。如果每次调用都全量重建 Context，LLM Provider 侧的 prompt cache 命中率接近 0%，造成大量重复 token 计费和延迟。Context Middleware 应通过分层快照和按变化频率排列来最大化缓存命中率。
+
+#### 设计原则
+- **按变化频率分层排列**：稳定内容在前，高频变化内容在后，让前缀尽可能可缓存。
+- **快照 + 版本号**：低频变化的 block（Research Plan、Working Memory、Relevant Evidence）用 version 标记，未变则不重建。
+- **Question-level Evidence 缓存**：Relevant Evidence 按当前 sub-question 的 hash 缓存，同一 sub-question 连续搜索时复用。
+- **Cache breakpoint**：在 Stable Prefix 和 Dynamic Suffix 之间明确标注断点。
+
+#### Context 分层与缓存策略
+
+| Context 区域 | 变化频率 | 缓存策略 | 命中条件 |
+| --- | --- | --- | --- |
+| System / Agent Policy | 永不变 | 静态缓存 | 始终命中 |
+| Task Brief (Stable Part) | 任务期间不变 | 静态缓存 | 同一任务始终命中 |
+| Research Plan (Snapshot) | 仅 plan 更新时变 | version-based snapshot | plan_version 未变则命中 |
+| Working Memory (Snapshot) | 仅压缩/新发现时变 | version-based snapshot | wm_version 未变则命中 |
+| Relevant Evidence (Cached) | 仅 question 变时变 | question-hash cache | current_question_hash 未变则命中 |
+| Current Phase | 低频，phase 转换时变 | 无缓存，但在前缀后 | — |
+| Current Sub-question | 每步可能变 | 无缓存 | — |
+| Progress + Gaps | 每步变 | 无缓存 | — |
+| Recent Messages | 每步必变 | 无缓存 | — |
+| Budget / Runtime | 每步变 | 无缓存 | — |
+| Eval Feedback | 每步变 | 无缓存 | — |
+
+#### 缓存命中场景与预期收益
+
+| 场景 | Stable Prefix | Plan + Working Memory | Evidence | 总命中率 |
+| --- | --- | --- | --- | --- |
+| 同一 sub-question 连续搜索（换关键词） | 命中 | 命中 | 命中 | ~80%+ |
+| 同一 phase 内不同 sub-question | 命中 | 命中 | 未命中 | ~60% |
+| Phase 转换后第一步 | 命中 | 可能命中 | 未命中 | ~40% |
+| 任务恢复后第一步 | 命中 | 可能命中 | 可能命中 | ~30-50% |
+
+对于 Long-Horizon 任务（几百步），同一 sub-question 连续搜索和同一 phase 内多步是主要场景，缓存命中率可以从接近 0% 提升到 60-80%。
+
+#### 实现要点
+```
+ContextBlock:
+  - content: str           # block 内容
+  - version: int           # 快照版本号
+  - content_hash: str      # 内容 hash，用于缓存 key
+  - last_injected_step: int # 上次注入的 step 序号
+
+ContextCacheManager:
+  - question_hash -> evidence_block   # sub-question 到 evidence 的缓存
+  - plan_version -> plan_block        # plan 版本到 plan block 的缓存
+  - wm_version -> wm_block            # working memory 版本到 block 的缓存
+
+before_model:
+  1. 计算 current_question_hash
+  2. 如果 hash 未变 -> 复用 evidence_block
+  3. 如果 plan_version 未变 -> 复用 plan_block
+  4. 如果 wm_version 未变 -> 复用 wm_block
+  5. 只重建发生变化的 block
+  6. 按 Stable Prefix → cache breakpoint → Dynamic Suffix 顺序拼接
+```
+
+#### 注意事项
+- 缓存的是**组装后的 block 文本**，不是 LLM 的 response。LLM Provider 的 prompt cache 是透明的，我们只需保证 prompt 前缀稳定即可。
+- 压缩触发时 Working Memory version 会 bump，此时该 block 缓存失效，但 System + Task Brief + Plan 仍命中。
+- 如果使用 Anthropic prompt caching API，可以在 cache breakpoint 处显式设置 cache_control，让 Provider 自动管理缓存。
+- 缓存命中统计应加入 Context Quality Eval 的指标中（见 16.11）。
+
+### 16.10 防止 Context Drift 的机制
 - Goal anchoring：每次 Model Call 都注入稳定 Task Brief。
 - State anchoring：始终提供 current phase、current question、progress。
-- Gap anchoring：始终暴露 unresolved gaps，避免“搜了很多但漏掉关键问题”。
+- Gap anchoring：始终暴露 unresolved gaps，避免"搜了很多但漏掉关键问题"。
 - Evidence anchoring：事实尽量引用结构化 evidence，而不是依赖记忆中的自然语言。
 - Plan anchoring：保留已完成/当前/待完成研究项。
 - Evaluation anchoring：把评估产生的缺口显式注入。
@@ -652,7 +742,7 @@ after_model(result):
 - Relevance retrieval：只召回与当前决策相关的长期记忆。
 - Phase transition：阶段变化时重新整理 Working Memory，防止旧阶段信息污染新阶段。
 - Contradiction check：发现新证据与旧 Finding 冲突时，标记旧 Finding 为 SUPERSEDED，而不是简单追加。
-### 16.10 Context Quality Evaluation
+### 16.11 Context Quality Evaluation
 Context 本身也应该进入 Eval，而不是只评估最终答案。
 
 | 指标 | 含义 |
@@ -665,10 +755,11 @@ Context 本身也应该进入 Eval，而不是只评估最终答案。
 | Compression Loss | 压缩前后关键事实是否丢失 |
 | Context Drift | 随着 Step 增长，Agent 是否逐渐偏离任务 |
 | Decision Quality | 当前 Context 是否足以支持正确下一步行动 |
+| Cache Hit Rate | prompt cache 命中率，反映 Context 组装是否按变化频率分层 |
 
 
-尤其建议建立 Long-Horizon Context Benchmark：让同一个任务运行 20、50、100、200 个 Step，比较不同 Context Strategy 下的 Goal Retention、Gap Awareness、Evidence Utilization 和最终 Task Success。
-### 16.11 Context Middleware 与 Eval Middleware 的协作
+尤其建议建立 Long-Horizon Context Benchmark：让同一个任务运行 20、50、100、200 个 Step，比较不同 Context Strategy 下的 Goal Retention、Gap Awareness、Evidence Utilization、Cache Hit Rate 和最终 Task Success。
+### 16.12 Context Middleware 与 Eval Middleware 的协作
 ```
                 ┌────────────────────────────┐
                 │      Current Task State     │
@@ -698,8 +789,8 @@ Context 本身也应该进入 Eval，而不是只评估最终答案。
                                            ▼
                                       next Model Call
 ```
-Eval 发现“当前研究缺少某个证据”时，不应该直接代替 Agent 搜索；它应该把 missing gap 写入结构化状态。下一轮 Context Middleware 将该 gap 提升到高优先级 Context，Agent 再决定如何解决。
-### 16.12 MVP 到后续版本的 Context 迭代
+Eval 发现"当前研究缺少某个证据"时，不应该直接代替 Agent 搜索；它应该把 missing gap 写入结构化状态。下一轮 Context Middleware 将该 gap 提升到高优先级 Context，Agent 再决定如何解决。
+### 16.13 MVP 到后续版本的 Context 迭代
 
 | 阶段 | Context 能力 |
 | --- | --- |
@@ -707,12 +798,13 @@ Eval 发现“当前研究缺少某个证据”时，不应该直接代替 Agent
 | V1 | Working Memory + Evidence Retrieval + Phase-aware Context |
 | V2 | 结构化 Finding/Decision/Gap + 增量压缩 + stale information |
 | V3 | Context Ranker + contradiction handling + dynamic token allocation |
+| V3.5 | Context Cache Strategy（snapshot + version-based + question-hash） |
 | V4 | Context Quality Eval + Long-Horizon Context Benchmark |
 | V5 | 根据任务阶段/模型能力动态选择 Context Strategy |
 
 
-### 16.13 这一设计最终解决什么问题
-Long-Horizon Agent 的 Context Management 最终要解决的不是“怎么让模型记住更多”，而是“怎么让模型在很长的任务中始终知道当前最重要的事情”。
+### 16.14 这一设计最终解决什么问题
+Long-Horizon Agent 的 Context Management 最终要解决的不是"怎么让模型记住更多"，而是"怎么让模型在很长的任务中始终知道当前最重要的事情"。
 ```
 Long Task
    ↓
@@ -736,9 +828,9 @@ Focused Working Context
    ↓
 Agent 保持对任务目标、进度、缺口和证据的持续感知
 ```
-因此本系统的 Context Middleware 可以理解为 Long-Horizon Agent 的“认知状态管理层”：它不负责替 Agent 做决定，而是确保 Agent 在每一次决策时都拥有足够、相关、最新且结构化的信息。
+因此本系统的 Context Middleware 可以理解为 Long-Horizon Agent 的"认知状态管理层"：它不负责替 Agent 做决定，而是确保 Agent 在每一次决策时都拥有足够、相关、最新且结构化的信息。
 ## 17. 更新后的核心架构定位
-经过 Context Engineering 加强后，本项目的核心不是简单的“DeepSearch + LangGraph”，而是一个以 Harness 为外层、LangGraph 为执行 Runtime、Middleware 为 Agent Cognitive Infrastructure 的 Long-Horizon Agent 系统。
+经过 Context Engineering 加强后，本项目的核心不是简单的"DeepSearch + LangGraph"，而是一个以 Harness 为外层、LangGraph 为执行 Runtime、Middleware 为 Agent Cognitive Infrastructure 的 Long-Horizon Agent 系统。
 ```
                     Long-Horizon Harness
                              │
@@ -774,7 +866,7 @@ Agent 保持对任务目标、进度、缺口和证据的持续感知
 - Observable Runtime：Task/Run/Step/Event 全链路可追踪，客户端断线不影响后台任务。
 - Reliable Execution：Lease、Heartbeat、Checkpoint、Recovery 解决 Worker Crash 和长任务中断问题。
 ## 19. 面试时推荐的 Context Engineering 表述
-如果被问“Long-Horizon Agent 最难的问题是什么”，推荐不要回答单纯的上下文窗口，而是回答：
+如果被问"Long-Horizon Agent 最难的问题是什么"，推荐不要回答单纯的上下文窗口，而是回答：
 ```
 Long-Horizon 最大的问题之一是 Context Drift。
 任务运行几十分钟甚至几小时后，历史消息、搜索结果和中间结论会不断增长。
@@ -789,6 +881,6 @@ Long-Horizon 最大的问题之一是 Context Drift。
 Eval Middleware 发现研究缺口后会更新 Gap，
 下一轮 Context Builder 再把这个 Gap 提升到高优先级。
 
-这样 Agent 每一步看到的都不是“最多的信息”，
-而是“当前决策最需要的信息”，从而降低长期运行过程中的 Context Drift 和注意力涣散。
+这样 Agent 每一步看到的都不是"最多的信息"，
+而是"当前决策最需要的信息"，从而降低长期运行过程中的 Context Drift 和注意力涣散。
 ```
