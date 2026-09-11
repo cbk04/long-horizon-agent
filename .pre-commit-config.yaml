@@ -1,0 +1,26 @@
+# Pre-commit 钩子:提交前自动跑 ruff(lint)+ mypy(类型检查)。
+#
+# 一次性安装(二选一):
+#   uv tool install pre-commit
+#   pip install pre-commit
+# 然后在仓库根目录执行:
+#   pre-commit install
+# 之后每次 `git commit` 都会先跑这里的检查,失败则阻止提交。
+# 手动全量跑一遍:pre-commit run --all-files
+
+repos:
+  - repo: local
+    hooks:
+      - id: ruff
+        name: ruff
+        entry: uv run ruff check
+        language: system
+        types: [python]
+        pass_filenames: false
+
+      - id: mypy
+        name: mypy
+        entry: uv run mypy app/
+        language: system
+        types: [python]
+        pass_filenames: false

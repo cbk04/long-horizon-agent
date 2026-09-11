@@ -1,29 +1,53 @@
 """End-to-end integration test for MVP: create task → worker runs → events.
 
-No lease/heartbeat/recovery — simple poll → execute → complete.
+Stubs the agent (no LLM / network) and drives the real worker lifecycle:
+create → plan pass (PAUSED at approval gate) → approve → resume → COMPLETED,
+verifying events, Redis stream, budget accounting, and that the final answer
+is persisted on the AgentRun.
 """
 
 from __future__ import annotations
 
-import json
 import os
 import sys
-import time
 import uuid
-from datetime import datetime
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
+import pytest
+
+from app.agent.staged import AwaitingApproval
 from app.harness import budget, event_bus
-from app.harness.task_manager import cancel_task, create_task, get_task, update_status
+from app.harness.task_manager import approve_plan, cancel_task, create_task, get_task
 from app.harness.worker import _process_task
 from app.storage.mysql.database import SessionLocal
-from app.config import get_settings
+from app.storage.mysql.models import AgentRun
+
+FAKE_RESULT = "MVP 端到端验证完成：所有阶段通过，最终报告生成。"
 
 
-def test_create_and_run_task():
-    """Create a task, run it through the worker, verify completion."""
-    settings = get_settings()
+@pytest.fixture()
+def stub_agent(monkeypatch):
+    """Replace the real staged-graph execution with the worker contract:
+    first pass pauses at the approval gate, resume pass returns the answer."""
+    from app.agent.staged.common import publish
+
+    def fake_execute_agent(task_id, run_id, goal, budget_limits, resume=None):
+        if resume is None:
+            publish(task_id, "agent_run.started", {"run_id": run_id, "model": "stub"})
+            publish(task_id, "plan.generated", {"run_id": run_id, "stages": []})
+            raise AwaitingApproval(task_id)
+        budget.add_input_tokens(task_id, 1200)
+        budget.add_output_tokens(task_id, 800)
+        budget.add_tool_call(task_id)
+        return FAKE_RESULT
+
+    monkeypatch.setattr("app.harness.worker._execute_agent", fake_execute_agent)
+
+
+def test_create_and_run_task(stub_agent):
+    """Create a task, run it through the worker with the approval gate, verify
+    completion and that the final answer is persisted on the AgentRun."""
     worker_id = f"test-worker-{uuid.uuid4().hex[:6]}"
 
     # 1. Create task
@@ -45,22 +69,46 @@ def test_create_and_run_task():
     finally:
         db.close()
 
-    # 2. Process task (run stub agent)
-    print(f"[2] Running worker process for {task_id}...")
+    # 2. First pass: plan generation, then pause at the approval gate
+    print(f"[2] Running worker process for {task_id} (plan pass)...")
     _process_task(task_id, worker_id)
-    print(f"[2] Worker process completed")
 
-    # 3. Verify final state
     db = SessionLocal()
     try:
         task = get_task(db, task_id)
-        print(f"[3] Final task status: {task.status}, result_ref: {task.result_ref}")
-        assert task.status == "COMPLETED", f"Expected COMPLETED, got {task.status}"
-        assert task.result_ref is not None
+        print(f"[2] After plan pass: status={task.status}")
+        assert task.status == "PAUSED", f"Expected PAUSED at approval gate, got {task.status}"
     finally:
         db.close()
 
-    # 4. Verify events were persisted
+    # 3. Approve the plan, worker resumes and runs all stages
+    db = SessionLocal()
+    try:
+        task, message = approve_plan(db, task_id)
+        print(f"[3] Approved: status={task.status}, message={message}")
+        assert task.status == "QUEUED"
+    finally:
+        db.close()
+
+    _process_task(task_id, worker_id)
+    print(f"[3] Worker resume completed")
+
+    # 4. Verify final state + persisted final answer
+    db = SessionLocal()
+    try:
+        task = get_task(db, task_id)
+        print(f"[4] Final task status: {task.status}, result_ref: {task.result_ref}")
+        assert task.status == "COMPLETED", f"Expected COMPLETED, got {task.status}"
+        assert task.result_ref is not None
+
+        run = db.query(AgentRun).filter(AgentRun.id == task.current_run_id).one()
+        print(f"[4] AgentRun {run.id}: status={run.status}, final_output={len(run.final_output or '')} chars")
+        assert run.status == "COMPLETED"
+        assert run.final_output == FAKE_RESULT, "final_output must be persisted on completion"
+    finally:
+        db.close()
+
+    # 5. Verify events were persisted
     db = SessionLocal()
     try:
         from app.harness.models import TaskEvent
@@ -71,25 +119,27 @@ def test_create_and_run_task():
             .order_by(TaskEvent.id.asc())
             .all()
         )
-        print(f"[4] Total events persisted: {len(events)}")
+        print(f"[5] Total events persisted: {len(events)}")
         event_types = [e.type for e in events]
         print(f"    Event types: {event_types}")
         assert "task.created" in event_types
         assert "agent_run.started" in event_types
+        assert "task.awaiting_approval" in event_types
+        assert "plan.approved" in event_types
         assert "task.completed" in event_types
     finally:
         db.close()
 
-    # 5. Verify Redis stream
+    # 6. Verify Redis stream
     from app.storage.redis.client import redis_client
 
     stream_len = redis_client.xlen(f"task:{task_id}:events")
-    print(f"[5] Redis stream length: {stream_len}")
+    print(f"[6] Redis stream length: {stream_len}")
     assert stream_len > 0
 
-    # 6. Verify budget was tracked
+    # 7. Verify budget was tracked
     usage = budget.get_usage(task_id)
-    print(f"[6] Budget usage: input={usage.input_tokens}, output={usage.output_tokens}, tool_calls={usage.tool_calls}")
+    print(f"[7] Budget usage: input={usage.input_tokens}, output={usage.output_tokens}, tool_calls={usage.tool_calls}")
     assert usage.input_tokens > 0
     assert usage.tool_calls > 0
 

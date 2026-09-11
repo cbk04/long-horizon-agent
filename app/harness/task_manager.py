@@ -9,7 +9,14 @@ from sqlalchemy.orm import Session
 
 from app.harness import event_bus
 from app.harness.models import TaskEvent
-from app.storage.mysql.models import Evidence, Task
+from app.storage.mysql.models import (
+    AgentMessage,
+    AgentRun,
+    Evidence,
+    StageEvaluation,
+    Task,
+    TaskBudgetUsage,
+)
 
 
 def create_task(
@@ -80,12 +87,14 @@ def cancel_task(db: Session, task_id: str) -> tuple[Task | None, str]:
     _ = redis_client.set(f"task:{task_id}:cancel", "1", ex=86400)
     event_bus.publish(db, task_id, "task.cancel_requested", {"reason": "user_requested"})
 
-    # If still queued, mark cancelled immediately
-    if task.status == "QUEUED":
+    # If queued or paused, no worker is actively polling the cancel flag, so
+    # mark cancelled immediately (a PAUSED task otherwise stays stuck forever).
+    if task.status in ("QUEUED", "PAUSED"):
         task.status = "CANCELLED"
         task.updated_at = datetime.now(timezone.utc)
         db.commit()
-        event_bus.publish(db, task_id, "task.cancelled", {"reason": "user_requested_while_queued"})
+        redis_client.delete(f"task:{task_id}:resume")
+        event_bus.publish(db, task_id, "task.cancelled", {"reason": "user_requested_while_idle"})
 
     return task, "Cancel requested"
 
@@ -95,6 +104,42 @@ def is_cancelled(task_id: str) -> bool:
     from app.storage.redis.client import redis_client
 
     return redis_client.get(f"task:{task_id}:cancel") is not None
+
+
+def approve_plan(db: Session, task_id: str) -> tuple[Task | None, str]:
+    """Approve a pending plan, requeue the task for the worker to resume."""
+    from app.storage.redis.client import redis_client
+
+    task = get_task(db, task_id)
+    if not task:
+        return None, "Task not found"
+    if task.status != "PAUSED":
+        return task, f"Task not awaiting approval: {task.status}"
+
+    redis_client.set(f"task:{task_id}:resume", "approved", ex=86400)
+    task.status = "QUEUED"
+    task.updated_at = datetime.now(timezone.utc)
+    db.commit()
+
+    event_bus.publish(db, task_id, "plan.approved", {"approved": True})
+    return task, "Plan approved"
+
+
+def reject_plan(db: Session, task_id: str) -> tuple[Task | None, str]:
+    """Reject a pending plan and cancel the task."""
+    task = get_task(db, task_id)
+    if not task:
+        return None, "Task not found"
+    if task.status != "PAUSED":
+        return task, f"Task not awaiting approval: {task.status}"
+
+    task.status = "CANCELLED"
+    task.updated_at = datetime.now(timezone.utc)
+    db.commit()
+
+    event_bus.publish(db, task_id, "plan.rejected", {"approved": False})
+    event_bus.publish(db, task_id, "task.cancelled", {"reason": "plan_rejected"})
+    return task, "Plan rejected"
 
 
 def list_events(db: Session, task_id: str, limit: int = 100, offset: int = 0) -> list[TaskEvent]:
@@ -116,6 +161,55 @@ def list_evidence(db: Session, task_id: str, limit: int = 100) -> list[Evidence]
         .order_by(Evidence.created_at.asc())
         .limit(limit)
         .all()
+    )
+
+
+def list_messages(db: Session, task_id: str) -> list[AgentMessage]:
+    """List every conversation message mirrored for a task.
+
+    Ordered by thread then sequence position; the route groups these into
+    threads (main graph + one per executed stage).
+    """
+    return (
+        db.query(AgentMessage)
+        .filter(AgentMessage.task_id == task_id)
+        .order_by(AgentMessage.thread_id.asc(), AgentMessage.seq.asc())
+        .all()
+    )
+
+
+def list_runs(db: Session, task_id: str) -> list[AgentRun]:
+    """List every agent run for a task, oldest first (``id`` as stable tiebreak)."""
+    return (
+        db.query(AgentRun)
+        .filter(AgentRun.task_id == task_id)
+        .order_by(AgentRun.created_at.asc(), AgentRun.id.asc())
+        .all()
+    )
+
+
+def list_evaluations(db: Session, task_id: str) -> list[StageEvaluation]:
+    """List every evaluator pass for a task, in stage/attempt/round order."""
+    return (
+        db.query(StageEvaluation)
+        .filter(StageEvaluation.task_id == task_id)
+        .order_by(
+            StageEvaluation.stage_index.asc(),
+            StageEvaluation.attempt.asc(),
+            StageEvaluation.defense_round.asc(),
+            StageEvaluation.created_at.asc(),
+            StageEvaluation.id.asc(),
+        )
+        .all()
+    )
+
+
+def get_budget_usage(db: Session, task_id: str) -> TaskBudgetUsage | None:
+    """Return the accumulated budget usage row for a task, if any."""
+    return (
+        db.query(TaskBudgetUsage)
+        .filter(TaskBudgetUsage.task_id == task_id)
+        .one_or_none()
     )
 
 

@@ -16,7 +16,6 @@ from sqlalchemy.orm import Session
 from app.harness.models import TaskEvent
 from app.storage.redis.client import redis_client
 
-
 # Redis key template for per-task event stream
 EVENTS_KEY = "task:{task_id}:events"
 # Default retention for completed task streams (24 hours)
@@ -67,6 +66,27 @@ def publish(
     return stream_id
 
 
+def publish_live(task_id: str, event_type: str, payload: dict[str, Any]) -> str:
+    """Publish an event to Redis Stream only (real-time, non-durable).
+
+    Used for high-frequency transient events (token/tool streaming) that must
+    reach the SSE consumer immediately but must not bloat the MySQL event log.
+    """
+    now = datetime.now(timezone.utc)
+    payload_json = json.dumps(payload, ensure_ascii=False, default=str)
+    raw_id = redis_client.xadd(
+        _events_key(task_id),
+        {
+            "type": event_type,
+            "payload": payload_json,
+            "ts": now.isoformat(),
+        },
+        maxlen=10_000,
+        approximate=True,
+    )
+    return raw_id if isinstance(raw_id, str) else str(raw_id)
+
+
 def consume_stream(
     task_id: str,
     last_id: str = "0",
@@ -83,10 +103,9 @@ def consume_stream(
         return []
     # Result: [(stream_key, [(stream_id, {field: value}), ...])]
     # redis-py's type stubs are overly broad; with decode_responses=True the actual
-    # runtime type is tuple[str, list[tuple[str, dict[str, str]]]].
-    raw: object = result[0]
-    first_result = cast(tuple[str, list[tuple[str, dict[str, str]]]], raw)
-    _, entries = first_result
+    # runtime type is list[tuple[str, list[tuple[str, dict[str, str]]]]].
+    results = cast(list[tuple[str, list[tuple[str, dict[str, str]]]]], result)
+    _, entries = results[0]
     events: list[dict[str, Any]] = []
     for entry in entries:
         entry_id, fields = entry
@@ -111,9 +130,10 @@ def stream(
     while True:
         events = consume_stream(task_id, current_id, block_ms=5000, count=100)
         if not events:
-            # Heartbeat: send a ping to keep SSE connection alive
+            # Heartbeat: a ping with no ``id`` keeps the SSE connection alive
+            # without polluting the browser's Last-Event-ID (which must stay a
+            # valid Redis stream id for resume to work).
             yield {
-                "id": f"{current_id}-ping",
                 "task_id": task_id,
                 "type": "ping",
                 "payload": {},

@@ -1,0 +1,1258 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Long-Horizon Agent</title>
+<style>
+  :root {
+    --bg: #f7f7f8;
+    --panel: #ffffff;
+    --border: #e4e4e7;
+    --text: #18181b;
+    --text-dim: #71717a;
+    --accent: #2563eb;
+    --accent-soft: #eff6ff;
+    --ok: #16a34a;
+    --warn: #d97706;
+    --err: #dc2626;
+    --muted: #a1a1aa;
+    --code-bg: #f4f4f5;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #101012;
+      --panel: #1a1a1e;
+      --border: #2e2e33;
+      --text: #e7e7ea;
+      --text-dim: #8e8e98;
+      --accent: #3b82f6;
+      --accent-soft: #16233d;
+      --ok: #22c55e;
+      --warn: #f59e0b;
+      --err: #ef4444;
+      --muted: #52525b;
+      --code-bg: #232329;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #101012;
+    --panel: #1a1a1e;
+    --border: #2e2e33;
+    --text: #e7e7ea;
+    --text-dim: #8e8e98;
+    --accent: #3b82f6;
+    --accent-soft: #16233d;
+    --ok: #22c55e;
+    --warn: #f59e0b;
+    --err: #ef4444;
+    --muted: #52525b;
+    --code-bg: #232329;
+  }
+
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0;
+    display: flex;
+    background: var(--bg);
+    color: var(--text);
+    font: 14px/1.6 -apple-system, "Segoe UI", "Microsoft YaHei", "PingFang SC", sans-serif;
+  }
+
+  /* ── sidebar ── */
+  #sidebar {
+    width: 264px;
+    flex: none;
+    display: flex;
+    flex-direction: column;
+    background: var(--panel);
+    border-right: 1px solid var(--border);
+  }
+  #new-chat {
+    margin: 12px;
+    padding: 9px 12px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--accent);
+    color: #fff;
+    font-size: 14px;
+    cursor: pointer;
+  }
+  #new-chat:hover { filter: brightness(1.08); }
+  #session-list { flex: 1; overflow-y: auto; padding: 0 8px 12px; }
+  .session {
+    padding: 8px 10px;
+    border-radius: 8px;
+    cursor: pointer;
+    margin-bottom: 2px;
+  }
+  .session:hover { background: var(--accent-soft); }
+  .session.active { background: var(--accent-soft); }
+  .session .row1 { display: flex; align-items: center; gap: 6px; }
+  .session .dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
+  .session .time { margin-left: auto; font-size: 11px; color: var(--text-dim); }
+  .session .goal {
+    margin-top: 2px;
+    font-size: 12.5px;
+    color: var(--text-dim);
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+
+  /* ── main ── */
+  main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+  #chat-header {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 18px;
+    border-bottom: 1px solid var(--border);
+    background: var(--panel);
+    min-height: 50px;
+  }
+  #header-goal {
+    flex: 1;
+    min-width: 0;
+    font-weight: 600;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  #cancel-btn {
+    display: none;
+    padding: 4px 12px;
+    border: 1px solid var(--err);
+    border-radius: 6px;
+    background: transparent;
+    color: var(--err);
+    cursor: pointer;
+    font-size: 13px;
+  }
+  .badge {
+    flex: none;
+    font-size: 12px;
+    padding: 2px 10px;
+    border-radius: 999px;
+    border: 1px solid var(--border);
+    color: var(--text-dim);
+  }
+  .badge.QUEUED { color: var(--text-dim); }
+  .badge.RUNNING { color: var(--accent); border-color: var(--accent); }
+  .badge.PAUSED { color: var(--warn); border-color: var(--warn); }
+  .badge.COMPLETED { color: var(--ok); border-color: var(--ok); }
+  .badge.FAILED { color: var(--err); border-color: var(--err); }
+
+  /* ── feed ── */
+  #feed {
+    flex: 1;
+    overflow-y: auto;
+    padding: 18px 18px 8px;
+  }
+  #feed-inner { max-width: 860px; margin: 0 auto; }
+  .empty-state {
+    color: var(--text-dim);
+    text-align: center;
+    margin-top: 18vh;
+    font-size: 14px;
+  }
+  .msg { margin-bottom: 14px; display: flex; }
+  .msg.user { justify-content: flex-end; }
+  .bubble {
+    max-width: 78%;
+    padding: 9px 13px;
+    border-radius: 12px;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+  .msg.user .bubble { background: var(--accent); color: #fff; border-bottom-right-radius: 4px; }
+  .msg.result .bubble {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-bottom-left-radius: 4px;
+    max-width: 92%;
+    width: 92%;
+    white-space: normal;
+  }
+  .msg.result .bubble h1, .msg.result .bubble h2, .msg.result .bubble h3 { margin: 14px 0 6px; line-height: 1.4; }
+  .msg.result .bubble h1 { font-size: 19px; } .msg.result .bubble h2 { font-size: 16.5px; } .msg.result .bubble h3 { font-size: 15px; }
+  .msg.result .bubble p { margin: 8px 0; }
+  .msg.result .bubble ul, .msg.result .bubble ol { margin: 6px 0; padding-left: 22px; }
+  .msg.result .bubble code {
+    background: var(--code-bg);
+    border-radius: 4px;
+    padding: 1px 5px;
+    font-size: 12.5px;
+    font-family: Consolas, Menlo, monospace;
+  }
+  .msg.result .bubble pre {
+    background: var(--code-bg);
+    border-radius: 8px;
+    padding: 10px 12px;
+    overflow-x: auto;
+    font-size: 12.5px;
+  }
+  .msg.result .bubble pre code { background: none; padding: 0; }
+  .msg.result .bubble.live {
+    border-left: 3px solid var(--accent);
+    color: var(--text-dim);
+  }
+
+  .note {
+    max-width: 860px;
+    margin: 0 auto 12px;
+    font-size: 12.5px;
+    color: var(--text-dim);
+    display: flex;
+    align-items: center;
+    gap: 7px;
+  }
+  .note.err { color: var(--err); }
+  .note.ok { color: var(--ok); }
+  .spinner {
+    width: 12px; height: 12px; flex: none;
+    border: 2px solid var(--accent);
+    border-top-color: transparent;
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* plan card */
+  .card {
+    max-width: 860px;
+    margin: 0 auto 14px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 13px 16px;
+  }
+  .card .card-title { font-weight: 600; margin-bottom: 8px; }
+  .stage-block { border-top: 1px dashed var(--border); padding: 9px 0; }
+  .stage-block:first-of-type { border-top: none; }
+  .stage-block .obj { font-weight: 600; }
+  .stage-block .meta { font-size: 12.5px; color: var(--text-dim); margin-top: 3px; }
+  .stage-block .acc { font-size: 12.5px; margin-top: 4px; padding-left: 2px; }
+  .stage-block .acc li { margin-bottom: 1px; }
+  .tag {
+    display: inline-block;
+    font-size: 11px;
+    padding: 0 7px;
+    border-radius: 999px;
+    border: 1px solid var(--border);
+    color: var(--text-dim);
+    margin-left: 6px;
+    vertical-align: 1px;
+  }
+  .tag.final { color: var(--accent); border-color: var(--accent); }
+  .card-actions { display: flex; gap: 10px; margin-top: 10px; }
+  .card-actions button {
+    padding: 7px 22px;
+    border-radius: 8px;
+    border: none;
+    font-size: 13.5px;
+    cursor: pointer;
+  }
+  #approve-btn { background: var(--ok); color: #fff; }
+  #reject-btn { background: transparent; border: 1px solid var(--err); color: var(--err); }
+  .card-actions button:disabled { opacity: 0.45; cursor: default; }
+  .verdict-pass { color: var(--ok); font-weight: 600; }
+  .verdict-retry { color: var(--warn); font-weight: 600; }
+
+  /* ── evaluation card ── */
+  .eval-card {
+    max-width: 860px;
+    margin: 0 auto 14px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 13px 16px;
+  }
+  .eval-head { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-bottom: 8px; }
+  .eval-stage { font-weight: 600; }
+  .eval-attempt { font-size: 12px; color: var(--text-dim); }
+  .eval-score { margin-left: auto; font-weight: 600; }
+  .eval-degraded {
+    font-size: 11px; padding: 1px 8px; border-radius: 999px;
+    border: 1px solid var(--warn); color: var(--warn);
+  }
+  .verdict {
+    font-size: 12px; padding: 2px 10px; border-radius: 999px;
+    border: 1px solid var(--border); font-weight: 600;
+  }
+  .verdict-verified, .verdict-completed { color: var(--ok); border-color: var(--ok); }
+  .verdict-incomplete { color: var(--err); border-color: var(--err); }
+  .verdict-defend { color: var(--warn); border-color: var(--warn); }
+
+  .eval-section { border-top: 1px dashed var(--border); padding: 9px 0; }
+  .eval-section:first-of-type { border-top: none; }
+  .eval-section-title { font-size: 13px; font-weight: 600; color: var(--text-dim); margin-bottom: 6px; }
+  .eval-list { margin: 4px 0; padding-left: 20px; }
+  .eval-list li { margin-bottom: 3px; }
+
+  .eval-table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+  .eval-table th, .eval-table td {
+    text-align: left; vertical-align: top; padding: 5px 8px;
+    border-bottom: 1px solid var(--border);
+  }
+  .eval-table th { color: var(--text-dim); font-weight: 600; white-space: nowrap; }
+  .rl-cons { font-weight: 600; }
+  .rl-score { font-weight: 600; text-align: center; white-space: nowrap; }
+  .rl-reason { color: var(--text-dim); }
+  .cs-score { font-weight: 600; text-align: center; white-space: nowrap; }
+  .s-full { color: var(--ok); }
+  .s-half { color: var(--warn); }
+  .s-zero { color: var(--err); }
+
+  .ce-item {
+    border: 1px solid var(--border); border-radius: 8px;
+    padding: 8px 11px; margin-bottom: 8px; background: var(--code-bg);
+  }
+  .ce-row { margin-bottom: 5px; display: flex; gap: 8px; align-items: baseline; }
+  .ce-k {
+    flex: none; font-size: 11px; color: var(--text-dim);
+    padding: 0 6px; border: 1px solid var(--border); border-radius: 4px;
+  }
+  .ce-v { word-break: break-word; }
+  .ce-quote {
+    margin: 2px 0; padding: 5px 9px; border-left: 2px solid var(--muted);
+    color: var(--text-dim); font-size: 12.5px; white-space: pre-wrap;
+  }
+  .ce-src { color: var(--accent); word-break: break-all; }
+  .ce-assess { font-size: 12px; color: var(--text-dim); margin-top: 4px; }
+  .ce-badge {
+    display: inline-block; font-size: 11px; padding: 0 7px; border-radius: 999px;
+    border: 1px solid var(--border); color: var(--text-dim); font-weight: 600;
+  }
+  .ce-badge.s-high { color: var(--err); border-color: var(--err); }
+  .ce-badge.s-medium { color: var(--warn); border-color: var(--warn); }
+  .ce-badge.s-low { color: var(--text-dim); }
+  .ce-badge.invalid { color: var(--muted); text-decoration: line-through; }
+  .ce-reason { color: var(--text-dim); }
+
+  /* ── composer ── */
+  #composer {
+    display: flex;
+    gap: 10px;
+    padding: 12px 18px 14px;
+    border-top: 1px solid var(--border);
+    background: var(--panel);
+  }
+  #composer-inner { display: flex; gap: 10px; width: 100%; max-width: 860px; margin: 0 auto; }
+  #goal-input {
+    flex: 1;
+    resize: none;
+    padding: 9px 12px;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: var(--bg);
+    color: var(--text);
+    font: inherit;
+    min-height: 42px;
+    max-height: 140px;
+    outline: none;
+  }
+  #goal-input:focus { border-color: var(--accent); }
+  #send-btn {
+    align-self: flex-end;
+    padding: 9px 20px;
+    border: none;
+    border-radius: 10px;
+    background: var(--accent);
+    color: #fff;
+    font-size: 14px;
+    cursor: pointer;
+  }
+  #send-btn:disabled { opacity: 0.5; cursor: default; }
+
+  @media (max-width: 720px) {
+    #sidebar { display: none; }
+    .msg .bubble { max-width: 92%; }
+  }
+
+  /* ── trace view ── */
+  #trace-btn {
+    padding: 4px 12px;
+    border: 1px solid var(--accent);
+    border-radius: 6px;
+    background: transparent;
+    color: var(--accent);
+    cursor: pointer;
+    font-size: 13px;
+  }
+  #trace-btn.on { background: var(--accent); color: #fff; }
+  #dash-link {
+    padding: 4px 12px;
+    border: 1px solid var(--accent);
+    border-radius: 6px;
+    background: transparent;
+    color: var(--accent);
+    cursor: pointer;
+    font-size: 13px;
+    text-decoration: none;
+    line-height: 1.6;
+  }
+  #dash-link:hover { background: var(--accent-soft); }
+  #trace-refresh {
+    display: none;
+    padding: 4px 12px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: transparent;
+    color: var(--text-dim);
+    cursor: pointer;
+    font-size: 13px;
+  }
+  .trace-thread { max-width: 860px; margin: 0 auto 18px; }
+  .trace-thread-title {
+    display: flex; align-items: center; gap: 8px;
+    font-weight: 600; font-size: 13.5px; margin-bottom: 8px;
+  }
+  .trace-thread-title .trace-dot {
+    width: 8px; height: 8px; border-radius: 50%;
+    background: var(--accent); flex: none;
+  }
+  .trace-thread-id {
+    font-size: 11px; color: var(--muted);
+    font-family: Consolas, Menlo, monospace; font-weight: 400;
+  }
+  .trace-msg {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 8px 12px;
+    margin-bottom: 8px;
+  }
+  .trace-msg-head { display: flex; align-items: center; gap: 6px; margin-bottom: 5px; }
+  .trace-role {
+    font-size: 11px; padding: 1px 8px; border-radius: 999px;
+    border: 1px solid var(--border); color: var(--text-dim);
+  }
+  .trace-role-human { color: var(--accent); border-color: var(--accent); }
+  .trace-role-ai { color: var(--ok); border-color: var(--ok); }
+  .trace-role-tool { color: var(--warn); border-color: var(--warn); }
+  .trace-role-system { color: var(--muted); }
+  .trace-tool-name {
+    font-size: 11px; color: var(--text-dim);
+    font-family: Consolas, Menlo, monospace;
+  }
+  .trace-content { white-space: pre-wrap; word-break: break-word; }
+  .trace-content p { margin: 4px 0; }
+  .trace-think {
+    margin: 4px 0;
+    border: 1px dashed var(--border);
+    border-radius: 8px;
+    padding: 6px 10px;
+    background: var(--code-bg);
+  }
+  .trace-think summary {
+    cursor: pointer; font-size: 12px; color: var(--text-dim); user-select: none;
+  }
+  .trace-think-body {
+    margin-top: 6px; color: var(--text-dim); font-size: 12.5px;
+    white-space: pre-wrap; word-break: break-word;
+  }
+  .trace-calls { margin: 5px 0; }
+  .trace-call {
+    border: 1px solid var(--border); border-radius: 8px;
+    padding: 6px 9px; margin-bottom: 5px; background: var(--code-bg);
+  }
+  .trace-call-name { font-weight: 600; font-size: 12.5px; color: var(--accent); margin-right: 8px; }
+  .trace-call code {
+    font-family: Consolas, Menlo, monospace; font-size: 12px;
+    color: var(--text-dim); word-break: break-all;
+  }
+  .trace-tool-result {
+    border-top: 1px dashed var(--border); margin-top: 7px; padding-top: 7px;
+    font-size: 12.5px; color: var(--text-dim);
+    white-space: pre-wrap; word-break: break-word;
+  }
+</style>
+</head>
+<body>
+
+<aside id="sidebar">
+  <button id="new-chat">＋ 新建会话</button>
+  <div id="session-list"></div>
+</aside>
+
+<main>
+  <header id="chat-header">
+    <div id="header-goal">Long-Horizon DeepSearch Agent</div>
+    <span id="status-badge" class="badge" style="display:none"></span>
+    <a id="dash-link" href="/dashboard" target="_blank" rel="noopener">看板</a>
+    <button id="trace-btn">对话详情</button>
+    <button id="trace-refresh">刷新</button>
+    <button id="cancel-btn">取消任务</button>
+  </header>
+  <div id="feed"><div id="feed-inner"></div></div>
+  <div id="composer">
+    <div id="composer-inner">
+      <textarea id="goal-input" rows="1"
+        placeholder="输入研究目标，创建新的研究会话（Enter 发送，Shift+Enter 换行）"></textarea>
+      <button id="send-btn">发送</button>
+    </div>
+  </div>
+</main>
+
+<script>
+"use strict";
+
+const API = "/api/v1";
+const $ = (id) => document.getElementById(id);
+const feed = $("feed-inner");
+
+const STATUS_LABEL = {
+  CREATED: "已创建", QUEUED: "排队中", RUNNING: "执行中", PAUSED: "待审批",
+  COMPLETED: "已完成", FAILED: "失败", CANCELLED: "已取消",
+};
+const DOT_COLOR = {
+  QUEUED: "var(--muted)", RUNNING: "var(--accent)", PAUSED: "var(--warn)",
+  COMPLETED: "var(--ok)", FAILED: "var(--err)", CANCELLED: "var(--muted)",
+  CREATED: "var(--muted)",
+};
+const ACTIVE_STATES = new Set(["CREATED", "QUEUED", "RUNNING", "PAUSED"]);
+const VERDICT_LABEL = {
+  PASSED: "通过", RETRY: "需重试", DEFEND: "待辩护", DEGRADED_PASS: "降级通过",
+};
+const EVAL_STATUS_LABEL = {
+  COMPLETED: "通过", INCOMPLETE: "需重试", DEFEND: "待辩护",
+};
+const STRENGTH_LABEL = { high: "强", medium: "中", low: "弱", invalid: "判废" };
+const TIMELINESS_LABEL = { high: "高", medium: "中", low: "低" };
+const CONFLICT_LABEL = { direct: "直接对立", perspective: "视角差异" };
+const LOGIC_LABEL = { high: "强", medium: "中", low: "弱" };
+
+const state = {
+  sessions: [],
+  currentId: null,
+  status: null,
+  es: null,            // EventSource
+  seen: new Set(),     // 已处理的事件 id（防 SSE 重连重放/历史接口重叠）
+  plan: null,
+  pendingStage: {},    // stage_id -> DOM 元素
+  approvalDone: false,
+  live: {},            // stream_id -> 流式气泡 DOM
+  toolNotes: {},       // tool run_id -> 工具进度 DOM
+  traceMode: false,    // 是否处于「完整对话」视图
+};
+
+/* ── 工具 ── */
+
+function esc(s) {
+  return String(s ?? "").replace(/[&<>"']/g,
+    (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+
+function fmtTime(iso) {
+  if (!iso) return "";
+  const d = new Date(iso);
+  if (isNaN(d)) return "";
+  const now = new Date();
+  const hm = `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+  if (d.toDateString() === now.toDateString()) return hm;
+  return `${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")} ${hm}`;
+}
+
+async function api(path, opts) {
+  const res = await fetch(API + path, opts);
+  if (!res.ok) throw new Error(`${res.status} ${await res.text()}`);
+  return res.json();
+}
+
+// 极简 markdown：标题/加粗/列表/代码块/段落
+function md(text) {
+  const fences = [];
+  let t = esc(text ?? "").replace(/```(\w*)\n([\s\S]*?)```/g, (_, lang, code) => {
+    fences.push(`<pre><code>${code}</code></pre>`);
+    return ` F${fences.length - 1} `;
+  });
+  const lines = t.split("\n");
+  const out = [];
+  let list = null;
+  const closeList = () => { if (list) { out.push(`</${list}>`); list = null; } };
+  for (const raw of lines) {
+    const line = raw.trimEnd();
+    const h = line.match(/^(#{1,4})\s+(.*)/);
+    const ul = line.match(/^[-*]\s+(.*)/);
+    const ol = line.match(/^\d+[.、]\s+(.*)/);
+    if (h) { closeList(); out.push(`<h${h[1].length}>${h[2]}</h${h[1].length}>`); }
+    else if (ul) { if (list !== "ul") { closeList(); out.push("<ul>"); list = "ul"; } out.push(`<li>${ul[1]}</li>`); }
+    else if (ol) { if (list !== "ol") { closeList(); out.push("<ol>"); list = "ol"; } out.push(`<li>${ol[1]}</li>`); }
+    else if (!line.trim()) { closeList(); }
+    else { closeList(); out.push(`<p>${line}</p>`); }
+  }
+  closeList();
+  t = out.join("\n").replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
+                     .replace(/`([^`]+)`/g, "<code>$1</code>");
+  return t.replace(/ F(\d+) /g, (_, i) => fences[+i]);
+}
+
+function scrollBottom() {
+  const box = $("feed");
+  box.scrollTop = box.scrollHeight;
+}
+
+function addEl(html) {
+  const div = document.createElement("div");
+  div.innerHTML = html;
+  const el = div.firstElementChild;
+  feed.appendChild(el);
+  scrollBottom();
+  return el;
+}
+
+/* ── 渲染：消息与卡片 ── */
+
+function addUserMsg(text) {
+  addEl(`<div class="msg user"><div class="bubble">${esc(text)}</div></div>`);
+}
+
+function addResultMsg(text) {
+  addEl(`<div class="msg result"><div class="bubble">${md(text)}</div></div>`);
+}
+
+function addNote(html, cls = "") {
+  return addEl(`<div class="note ${cls}"><span>${html}</span></div>`);
+}
+
+function activityNote(label) {
+  let el = $("activity-note");
+  if (!el) {
+    el = addNote(`<span class="spinner"></span><span>${esc(label)}</span>`);
+    el.id = "activity-note";
+  } else {
+    el.lastElementChild.textContent = label;
+    scrollBottom();
+  }
+  return el;
+}
+function clearActivity() {
+  const el = $("activity-note");
+  if (el) el.remove();
+}
+
+function renderPlanCard(stages) {
+  const items = stages.map((s, i) => `
+    <div class="stage-block">
+      <div class="obj">阶段 ${i + 1}：${esc(s.objective)}
+        ${s.is_final ? '<span class="tag final">最终报告</span>' : ""}
+        ${s.output_contract && s.output_contract.min_length ? `<span class="tag">≥${s.output_contract.min_length} 字</span>` : ""}
+      </div>
+      <div class="meta">不做：${esc((s.scope_excludes || []).join("、"))}</div>
+      <ul class="acc">${(s.acceptance || []).map(a =>
+        `<li>${esc(a.dimension)}（权重 ${a.weight}）：${esc(a.criteria)}</li>`).join("")}</ul>
+    </div>`).join("");
+  const card = addEl(`
+    <div class="card" id="plan-card">
+      <div class="card-title">执行计划（${stages.length} 个阶段）</div>
+      ${items}
+      <div class="card-actions" id="approval-actions" style="display:none">
+        <button id="approve-btn">批准，开始执行</button>
+        <button id="reject-btn">拒绝并取消</button>
+      </div>
+    </div>`);
+  $("approve-btn").onclick = () => decidePlan("approve");
+  $("reject-btn").onclick = () => decidePlan("reject");
+  return card;
+}
+
+function showApprovalActions() {
+  const box = $("approval-actions");
+  if (box && !state.approvalDone) box.style.display = "flex";
+}
+
+async function decidePlan(action) {
+  try {
+    $("approve-btn").disabled = true;
+    $("reject-btn").disabled = true;
+    await api(`/tasks/${state.currentId}/${action}`, { method: "POST" });
+    state.approvalDone = true;
+    if (action === "approve") {
+      setStatus("QUEUED");
+      addNote("已批准计划，等待执行……", "ok");
+    } else {
+      setStatus("CANCELLED");
+      addNote("已拒绝计划，任务取消。", "err");
+    }
+  } catch (e) {
+    addNote(`操作失败：${esc(e.message)}`, "err");
+    $("approve-btn").disabled = false;
+    $("reject-btn").disabled = false;
+  }
+}
+
+function stageItem(stageId, objective, attempt) {
+  const old = state.pendingStage[stageId];
+  if (old) old.remove();
+  const el = addNote(
+    `<span class="spinner"></span><span>阶段 ${stageId + 1}${attempt > 1 ? `（第 ${attempt} 次尝试）` : ""}：${esc(objective)}</span>`
+  );
+  state.pendingStage[stageId] = el;
+  return el;
+}
+
+function stageDone(stageId, ok, extra) {
+  const el = state.pendingStage[stageId];
+  if (el) {
+    el.remove();
+    delete state.pendingStage[stageId];
+  }
+  addNote(`阶段 ${stageId + 1} ${ok ? "完成" : "未通过"}${extra ? " · " + extra : ""}`,
+          ok ? "ok" : "err");
+}
+
+/* ── 评估结果卡片 ── */
+
+function scoreTone(s) {
+  if (s == null) return "";
+  if (s >= 0.999) return "s-full";
+  if (s >= 0.5) return "s-half";
+  return "s-zero";
+}
+function relevanceTone(s) {
+  if (s >= 0.7) return "s-full";
+  if (s >= 0.4) return "s-half";
+  return "s-zero";
+}
+// 与后端 counterexample_strength 一致：从裁决字段确定性推导强度。
+function ceStrength(a) {
+  if (!a || !a.valid) return "invalid";
+  if (a.timeliness === "low" || a.logic === "low") return "low";
+  if (a.conflict === "perspective") return "medium";
+  if (a.timeliness === "high" && a.logic === "high") return "high";
+  return "medium";
+}
+
+function ceItemHTML(ce, a) {
+  const parts = [];
+  if (ce.claim) parts.push(`<div class="ce-row"><span class="ce-k">结论</span><span class="ce-v">${esc(ce.claim)}</span></div>`);
+  if (ce.counter_evidence) parts.push(`<div class="ce-row"><span class="ce-k">反例事实</span><span class="ce-v">${esc(ce.counter_evidence)}</span></div>`);
+  if (ce.quote) parts.push(`<div class="ce-row"><span class="ce-k">证据原文</span><blockquote class="ce-quote">${esc(ce.quote)}</blockquote></div>`);
+  if (ce.source_url) parts.push(`<div class="ce-row"><span class="ce-k">来源</span><a class="ce-src" href="${esc(ce.source_url)}" target="_blank" rel="noopener">${esc(ce.source_url)}</a></div>`);
+  if (ce.date) parts.push(`<div class="ce-row"><span class="ce-k">日期</span><span class="ce-v">${esc(ce.date)}</span></div>`);
+
+  if (a) {
+    const strength = ceStrength(a);
+    const tags = [];
+    if (a.valid === false) {
+      tags.push(`<span class="ce-badge invalid">判废</span>`);
+    } else {
+      tags.push(`<span class="ce-badge s-${strength}">强度 ${STRENGTH_LABEL[strength] || strength}</span>`);
+      if (a.timeliness) tags.push(`时效 ${TIMELINESS_LABEL[a.timeliness] || a.timeliness}`);
+      if (a.conflict) tags.push(`${CONFLICT_LABEL[a.conflict] || a.conflict}`);
+      if (a.logic) tags.push(`逻辑 ${LOGIC_LABEL[a.logic] || a.logic}`);
+    }
+    if (a.reason) tags.push(`<span class="ce-reason">${esc(a.reason)}</span>`);
+    parts.push(`<div class="ce-assess">${tags.join(" · ")}</div>`);
+  }
+  return `<div class="ce-item">${parts.join("")}</div>`;
+}
+
+function evalCardHTML(stageId, p) {
+  const status = p.status || "";
+  const v = EVAL_STATUS_LABEL[status] || status;
+  const attempt = p.attempt || 1;
+  const defenseRound = p.defense_round || 0;
+  const weighted = p.phase3 && p.phase3.weighted_score != null
+    ? Number(p.phase3.weighted_score).toFixed(2) : null;
+  const attemptLabel = defenseRound > 0
+    ? `辩护第 ${defenseRound} 轮` : (attempt > 1 ? `第 ${attempt} 次尝试` : "");
+
+  let sections = "";
+
+  // Phase 1 — 规则评估
+  const violations = (p.phase1 && p.phase1.violations) || [];
+  if (violations.length) {
+    sections += `<div class="eval-section"><div class="eval-section-title">规则评估 · 违规（零 LLM 短路）</div>
+      <ul class="eval-list">${violations.map(x => `<li>${esc(x)}</li>`).join("")}</ul></div>`;
+  }
+
+  // Phase 2 — 正向审计：结论↔证据相关性分数
+  const fwd = (p.phase2 && p.phase2.forward) || {};
+  const relevance = fwd.relevance || [];
+  if (relevance.length) {
+    const rows = relevance.map(r => `
+      <tr>
+        <td class="rl-cons">${esc(r.conclusion)}</td>
+        <td class="rl-score ${relevanceTone(r.relevance_score)}">${r.relevance_score == null ? "—" : Number(r.relevance_score).toFixed(2)}</td>
+        <td class="rl-reason">${esc(r.reason)}</td>
+      </tr>`).join("");
+    sections += `<div class="eval-section"><div class="eval-section-title">正向审计 · 结论 ↔ 证据相关性</div>
+      <table class="eval-table"><thead><tr><th>结论断言</th><th>相关性</th><th>理由</th></tr></thead>
+      <tbody>${rows}</tbody></table></div>`;
+  }
+
+  // Phase 2 — 反向挑战：真相核查（事实反例）
+  const rev = (p.phase2 && p.phase2.reverse) || {};
+  const ces = rev.counterexamples || [];
+  const assessments = rev.assessments || [];
+  if (ces.length) {
+    const tierLabel = rev.tier ? STRENGTH_LABEL[rev.tier] || rev.tier : "";
+    const items = ces.map((ce, i) => ceItemHTML(ce, assessments[i])).join("");
+    sections += `<div class="eval-section"><div class="eval-section-title">真相核查 · 事实反例${tierLabel ? `（综合强度：${esc(tierLabel)}）` : ""}${rev.defended ? " · 已辩护" : ""}</div>
+      ${items}</div>`;
+  }
+
+  // Phase 3 — 加权打分
+  const p3 = p.phase3 || {};
+  const crits = p3.criteria_scores || [];
+  if (crits.length) {
+    const rows = crits.map(c => `
+      <tr>
+        <td>${esc(c.dimension)}</td>
+        <td>${esc(c.criteria)}</td>
+        <td>${c.weight != null ? Number(c.weight).toFixed(2) : ""}</td>
+        <td class="cs-score ${scoreTone(c.score)}">${c.score == null ? "—" : Number(c.score).toFixed(2)}</td>
+        <td>${esc(c.comment)}</td>
+      </tr>`).join("");
+    sections += `<div class="eval-section"><div class="eval-section-title">加权打分</div>
+      <table class="eval-table"><thead><tr><th>维度</th><th>标准</th><th>权重</th><th>得分</th><th>评语</th></tr></thead>
+      <tbody>${rows}</tbody></table></div>`;
+  }
+
+  // 反馈 / 关键发现
+  const feedback = p.feedback || [];
+  if (feedback.length) {
+    sections += `<div class="eval-section"><div class="eval-section-title">反馈</div>
+      <ul class="eval-list">${feedback.map(x => `<li>${esc(x)}</li>`).join("")}</ul></div>`;
+  }
+  const kf = p.key_findings || [];
+  if (kf.length) {
+    sections += `<div class="eval-section"><div class="eval-section-title">关键发现</div>
+      <ul class="eval-list">${kf.map(x => `<li>${esc(x)}</li>`).join("")}</ul></div>`;
+  }
+
+  return `<div class="eval-head">
+      <span class="eval-stage">阶段 ${stageId + 1} 评估</span>
+      ${attemptLabel ? `<span class="eval-attempt">${esc(attemptLabel)}</span>` : ""}
+      <span class="verdict verdict-${status.toLowerCase()}">${esc(v)}</span>
+      ${p.eval_degraded ? `<span class="eval-degraded">评估降级</span>` : ""}
+      ${weighted != null ? `<span class="eval-score">评分 ${weighted}</span>` : ""}
+    </div>${sections}`;
+}
+
+function renderEvalCard(stageId, p) {
+  addEl(`<div class="eval-card">${evalCardHTML(stageId, p)}</div>`);
+}
+
+/* ── 事件应用（历史回放与 SSE 共用）── */
+
+function applyEvent(ev) {
+  if (!ev || ev.type === "ping") return;
+  if (state.seen.has(ev.id)) return;
+  state.seen.add(ev.id);
+  const p = ev.payload || {};
+
+  switch (ev.type) {
+    case "task.created":
+      addUserMsg(p.goal || "");
+      break;
+    case "agent_run.started":
+      activityNote(`开始执行${p.model ? ` · 模型 ${p.model}` : ""}`);
+      break;
+    case "plan.generated":
+      clearActivity();
+      state.plan = p.stages || [];
+      renderPlanCard(state.plan);
+      break;
+    case "task.awaiting_approval":
+      clearActivity();
+      setStatus("PAUSED");
+      showApprovalActions();
+      addNote("计划已生成，等待人工审批。");
+      break;
+    case "plan.approved":
+      state.approvalDone = true;
+      const actions = $("approval-actions");
+      if (actions) actions.style.display = "none";
+      break;
+    case "plan.rejected":
+      state.approvalDone = true;
+      break;
+    case "stage.started":
+      clearActivity();
+      stageItem(p.stage_id, p.objective || "", p.attempt || 1);
+      break;
+    case "stage.evaluated": {
+      const el = state.pendingStage[p.stage_id];
+      if (el) {
+        el.remove();
+        delete state.pendingStage[p.stage_id];
+      }
+      renderEvalCard(p.stage_id, p);
+      break;
+    }
+    case "stage.defended":
+      addNote(`阶段 ${p.stage_id + 1} 辩护第 ${p.defense_round + 1} 轮 · 强度 ${esc(p.tier || "")}`);
+      break;
+    case "stage.completed": {
+      clearActivity();
+      const score = p.weighted_score != null ? `评分 ${Number(p.weighted_score).toFixed(2)}` : "";
+      stageDone(p.stage_id, true, score);
+      if ((p.key_findings || []).length) {
+        addNote(`阶段 ${p.stage_id + 1} 关键发现：${esc(p.key_findings.join("；"))}`);
+      }
+      break;
+    }
+    case "graph.step":
+    case "react.step":
+      activityNote(`执行中 · ${p.node || "…"} 节点`);
+      break;
+    case "model_call.started":
+      activityNote("模型调用中……");
+      break;
+    case "stream.started": {
+      const el = addEl(`<div class="msg result"><div class="bubble live"></div></div>`);
+      state.live[p.stream_id] = el.querySelector(".bubble");
+      break;
+    }
+    case "token": {
+      const bubble = state.live[p.stream_id];
+      if (bubble) { bubble.textContent += p.text || ""; scrollBottom(); }
+      break;
+    }
+    case "stream.ended":
+      delete state.live[p.stream_id];
+      break;
+    case "tool.started": {
+      const q = (p.args && (p.args.query || p.args.url)) || "";
+      const label = p.name === "web_fetch" ? "📄 读取：" : "🔍 搜索：";
+      const el = addNote(`<span class="spinner"></span><span>${esc(label)}${esc(q)}</span>`);
+      if (p.run_id) state.toolNotes[p.run_id] = el;
+      break;
+    }
+    case "tool.completed": {
+      const el = p.run_id && state.toolNotes[p.run_id];
+      if (el) {
+        const sp = el.querySelector(".spinner");
+        if (sp) sp.remove();
+        if (p.summary) el.lastElementChild.textContent += ` · ${esc(p.summary)}`;
+        delete state.toolNotes[p.run_id];
+      }
+      break;
+    }
+    case "agent_run.completed":
+      clearActivity();
+      addNote(`执行完成 · 用时 ${Math.round((p.elapsed_ms || 0) / 1000)}s · tokens ${p.total_input_tokens || 0}→${p.total_output_tokens || 0} · 工具调用 ${p.total_tool_calls || 0}`);
+      break;
+    case "task.completed":
+      clearActivity();
+      addResultMsg(p.result || p.result_preview || "(无结果)");
+      setStatus("COMPLETED");
+      onTerminal();
+      break;
+    case "task.failed":
+      clearActivity();
+      addNote(`任务失败：${esc(p.error || "未知错误")}`, "err");
+      setStatus("FAILED");
+      onTerminal();
+      break;
+    case "task.budget_exceeded":
+      clearActivity();
+      addNote(`预算超限（${esc(p.reason || "")}），任务失败。`, "err");
+      setStatus("FAILED");
+      onTerminal();
+      break;
+    case "task.cancelled":
+      clearActivity();
+      addNote("任务已取消。", "err");
+      setStatus("CANCELLED");
+      onTerminal();
+      break;
+    case "task.cancel_requested":
+      addNote("取消请求已发出，等待停止……");
+      break;
+  }
+}
+
+/* ── SSE ── */
+
+const SSE_TYPES = [
+  "task.created", "agent_run.started", "plan.generated", "task.awaiting_approval",
+  "plan.approved", "plan.rejected", "stage.started", "stage.evaluated",
+  "stage.defended", "stage.completed", "graph.step", "react.step",
+  "model_call.started", "model_call.completed", "agent_run.completed",
+  "task.completed", "task.failed", "task.budget_exceeded",
+  "task.cancelled", "task.cancel_requested", "ping",
+  "stream.started", "token", "stream.ended", "tool.started", "tool.completed",
+];
+
+function closeStream() {
+  if (state.es) { state.es.close(); state.es = null; }
+}
+
+function openStream(taskId) {
+  closeStream();
+  const es = new EventSource(`${API}/tasks/${taskId}/stream`);
+  state.es = es;
+  for (const type of SSE_TYPES) {
+    es.addEventListener(type, (e) => {
+      try { applyEvent(JSON.parse(e.data)); } catch { /* 忽略坏帧 */ }
+    });
+  }
+  es.onerror = () => {
+    // readyState CLOSED：服务端不可用；EventSource 会自动重连并全量重放（seen 去重）
+    if (es.readyState === EventSource.CLOSED && state.currentId === taskId && ACTIVE_STATES.has(state.status)) {
+      setTimeout(() => { if (state.currentId === taskId) openStream(taskId); }, 3000);
+    }
+  };
+}
+
+/* ── 完整对话详情 ── */
+
+const ROLE_LABEL = { human: "用户", ai: "AI", tool: "工具", system: "系统" };
+
+function traceMsgHTML(m) {
+  let body = "";
+  if (m.reasoning_content) {
+    body += `<details class="trace-think"><summary>💭 思考过程</summary><div class="trace-think-body">${md(m.reasoning_content)}</div></details>`;
+  }
+  if (m.tool_calls && m.tool_calls.length) {
+    body += `<div class="trace-calls">${m.tool_calls.map((c) =>
+      `<div class="trace-call"><span class="trace-call-name">🔧 ${esc(c.name)}</span><code>${esc(typeof c.args === "string" ? c.args : JSON.stringify(c.args))}</code></div>`
+    ).join("")}</div>`;
+  }
+  let content = "";
+  if (m.role === "tool") {
+    content = `<div class="trace-tool-result">${md(m.content)}</div>`;
+  } else if (m.content) {
+    content = `<div class="trace-content">${md(m.content)}</div>`;
+  }
+  const toolName = m.tool_name ? `<span class="trace-tool-name">${esc(m.tool_name)}</span>` : "";
+  return `<div class="trace-msg">
+    <div class="trace-msg-head">
+      <span class="trace-role trace-role-${esc(m.role)}">${ROLE_LABEL[m.role] || m.role}</span>
+      ${toolName}
+    </div>
+    ${body}${content}
+  </div>`;
+}
+
+function traceThreadHTML(thread) {
+  const label = thread.stage_index == null ? "主流程" : `阶段 ${thread.stage_index + 1}`;
+  const msgs = (thread.messages || []).map(traceMsgHTML).join("");
+  return `<div class="trace-thread">
+    <div class="trace-thread-title"><span class="trace-dot"></span>${esc(label)}<span class="trace-thread-id">${esc(thread.thread_id)}</span></div>
+    ${msgs}
+  </div>`;
+}
+
+async function renderTrace(taskId) {
+  const data = await api(`/tasks/${taskId}/messages`);
+  feed.innerHTML = "";
+  if (!data.length) {
+    addNote("暂无对话记录：任务可能尚未执行，或未产生消息。");
+    return;
+  }
+  for (const thread of data) {
+    const div = document.createElement("div");
+    div.innerHTML = traceThreadHTML(thread);
+    feed.appendChild(div.firstElementChild);
+  }
+  scrollBottom();
+}
+
+function resetTraceUI() {
+  state.traceMode = false;
+  $("trace-btn").textContent = "对话详情";
+  $("trace-btn").classList.remove("on");
+  $("trace-refresh").style.display = "none";
+}
+
+async function enterTrace() {
+  if (!state.currentId) return;
+  closeStream();
+  state.traceMode = true;
+  $("trace-btn").textContent = "进度流";
+  $("trace-btn").classList.add("on");
+  $("trace-refresh").style.display = "inline-block";
+  try {
+    await renderTrace(state.currentId);
+  } catch (e) {
+    addNote(`加载对话失败：${esc(e.message)}`, "err");
+  }
+}
+
+function exitTrace() {
+  const id = state.currentId;
+  resetTraceUI();
+  if (id) {
+    state.currentId = null; // 强制重放
+    openSession(id);
+  }
+}
+
+/* ── 会话管理 ── */
+
+function setStatus(status) {
+  state.status = status;
+  const badge = $("status-badge");
+  badge.style.display = "";
+  badge.textContent = STATUS_LABEL[status] || status;
+  badge.className = `badge ${status}`;
+  const cancel = $("cancel-btn");
+  cancel.textContent = "取消任务";
+  cancel.disabled = false;
+  cancel.style.display = ACTIVE_STATES.has(status) && !["CREATED"].includes(status) ? "" : "none";
+}
+
+function onTerminal() {
+  closeStream();
+  loadSessions();
+}
+
+function resetFeed() {
+  feed.innerHTML = "";
+  state.seen = new Set();
+  state.plan = null;
+  state.pendingStage = {};
+  state.approvalDone = false;
+  clearActivity();
+}
+
+async function openSession(id) {
+  if (state.currentId === id) return;
+  closeStream();
+  state.currentId = id;
+  resetFeed();
+  resetTraceUI();
+  document.querySelectorAll(".session").forEach((el) =>
+    el.classList.toggle("active", el.dataset.id === id));
+
+  try {
+    const [task, events] = await Promise.all([
+      api(`/tasks/${id}`),
+      api(`/tasks/${id}/events?limit=1000`),
+    ]);
+    setStatus(task.status);
+    $("header-goal").textContent = task.goal;
+    // 先回放历史（按 id 去重，SSE 打开后重叠部分会跳过）
+    for (const ev of events) applyEvent(ev);
+
+    if (task.status === "PAUSED") showApprovalActions();
+    if (task.status === "COMPLETED" && !feed.querySelector(".msg.result")) {
+      // 兼容老任务：事件里没有完整结果时从 result 接口兜底
+      try {
+        const r = await api(`/tasks/${id}/result`);
+        if (r.final_output) addResultMsg(r.final_output);
+      } catch { /* 无结果 */ }
+    }
+    if (ACTIVE_STATES.has(task.status)) openStream(id);
+  } catch (e) {
+    addNote(`加载会话失败：${esc(e.message)}`, "err");
+  }
+  scrollBottom();
+}
+
+async function loadSessions() {
+  try {
+    state.sessions = await api("/tasks?limit=50");
+    renderSessionList();
+  } catch { /* 静默 */ }
+}
+
+function renderSessionList() {
+  const box = $("session-list");
+  box.innerHTML = "";
+  for (const t of state.sessions) {
+    const el = document.createElement("div");
+    el.className = "session" + (t.id === state.currentId ? " active" : "");
+    el.dataset.id = t.id;
+    el.innerHTML = `
+      <div class="row1">
+        <span class="dot" style="background:${DOT_COLOR[t.status] || "var(--muted)"}"></span>
+        <span style="font-size:12px;color:var(--text-dim)">${STATUS_LABEL[t.status] || t.status}</span>
+        <span class="time">${fmtTime(t.updated_at)}</span>
+      </div>
+      <div class="goal">${esc(t.goal)}</div>`;
+    el.onclick = () => openSession(t.id);
+    box.appendChild(el);
+  }
+}
+
+async function createSession(goal) {
+  $("send-btn").disabled = true;
+  try {
+    const task = await api("/tasks", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ goal }),
+    });
+    await loadSessions();
+    state.currentId = null; // 强制重新打开
+    await openSession(task.id);
+  } catch (e) {
+    addNote(`创建任务失败：${esc(e.message)}`, "err");
+  } finally {
+    $("send-btn").disabled = false;
+  }
+}
+
+/* ── 顶栏操作 ── */
+
+$("trace-btn").onclick = () => (state.traceMode ? exitTrace() : enterTrace());
+$("trace-refresh").onclick = () => {
+  if (state.currentId) {
+    renderTrace(state.currentId).catch((e) => addNote(`加载对话失败：${esc(e.message)}`, "err"));
+  }
+};
+
+$("cancel-btn").onclick = async () => {
+  if (!state.currentId) return;
+  const btn = $("cancel-btn");
+  btn.disabled = true;
+  btn.textContent = "取消中…";
+  try {
+    await api(`/tasks/${state.currentId}/cancel`, { method: "POST" });
+    addNote("取消请求已发出，正在停止……");
+  } catch (e) {
+    btn.disabled = false;
+    btn.textContent = "取消任务";
+    addNote(`取消失败：${esc(e.message)}`, "err");
+  }
+};
+
+$("new-chat").onclick = () => {
+  closeStream();
+  state.currentId = null;
+  resetFeed();
+  resetTraceUI();
+  setStatus("CREATED");
+  $("header-goal").textContent = "新会话";
+  document.querySelectorAll(".session").forEach((el) => el.classList.remove("active"));
+  addNote("输入研究目标，发送后创建任务。计划生成后会暂停等待你审批。");
+  $("goal-input").focus();
+};
+
+/* ── 输入框 ── */
+
+const input = $("goal-input");
+input.addEventListener("input", () => {
+  input.style.height = "auto";
+  input.style.height = Math.min(input.scrollHeight, 140) + "px";
+});
+input.addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && !e.shiftKey) {
+    e.preventDefault();
+    send();
+  }
+});
+$("send-btn").onclick = send;
+
+function send() {
+  const goal = input.value.trim();
+  if (!goal) return;
+  input.value = "";
+  input.style.height = "auto";
+  createSession(goal);
+}
+
+/* ── 启动 ── */
+
+loadSessions();
+</script>
+</body>
+</html>

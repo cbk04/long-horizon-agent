@@ -1,0 +1,862 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Agent 运行看板</title>
+<style>
+  :root {
+    --bg: #f7f7f8;
+    --panel: #ffffff;
+    --border: #e4e4e7;
+    --text: #18181b;
+    --text-dim: #71717a;
+    --accent: #2563eb;
+    --accent-soft: #eff6ff;
+    --ok: #16a34a;
+    --warn: #d97706;
+    --err: #dc2626;
+    --muted: #a1a1aa;
+    --code-bg: #f4f4f5;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #101012;
+      --panel: #1a1a1e;
+      --border: #2e2e33;
+      --text: #e7e7ea;
+      --text-dim: #8e8e98;
+      --accent: #3b82f6;
+      --accent-soft: #16233d;
+      --ok: #22c55e;
+      --warn: #f59e0b;
+      --err: #ef4444;
+      --muted: #52525b;
+      --code-bg: #232329;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #101012;
+    --panel: #1a1a1e;
+    --border: #2e2e33;
+    --text: #e7e7ea;
+    --text-dim: #8e8e98;
+    --accent: #3b82f6;
+    --accent-soft: #16233d;
+    --ok: #22c55e;
+    --warn: #f59e0b;
+    --err: #ef4444;
+    --muted: #52525b;
+    --code-bg: #232329;
+  }
+
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0;
+    display: flex;
+    background: var(--bg);
+    color: var(--text);
+    font: 14px/1.6 -apple-system, "Segoe UI", "Microsoft YaHei", "PingFang SC", sans-serif;
+  }
+  a { color: var(--accent); text-decoration: none; }
+  code, pre {
+    font-family: Consolas, Menlo, "Courier New", monospace;
+    background: var(--code-bg);
+  }
+  code { padding: 1px 5px; border-radius: 4px; font-size: 12.5px; }
+  pre {
+    border-radius: 8px; padding: 10px 12px; overflow-x: auto; font-size: 12.5px;
+  }
+
+  /* ── sidebar ── */
+  #sidebar {
+    width: 280px; flex: none; display: flex; flex-direction: column;
+    background: var(--panel); border-right: 1px solid var(--border);
+  }
+  .side-head {
+    display: flex; align-items: center; gap: 8px;
+    padding: 10px 12px; border-bottom: 1px solid var(--border);
+  }
+  .side-head a { font-size: 13px; }
+  .side-head button {
+    margin-left: auto; padding: 3px 10px; font-size: 12px;
+    border: 1px solid var(--border); border-radius: 6px; background: transparent;
+    color: var(--text-dim); cursor: pointer;
+  }
+  #task-list { flex: 1; overflow-y: auto; padding: 8px; }
+  .task-item {
+    padding: 8px 10px; border-radius: 8px; cursor: pointer; margin-bottom: 2px;
+  }
+  .task-item:hover { background: var(--accent-soft); }
+  .task-item.active { background: var(--accent-soft); }
+  .task-item .row1 { display: flex; align-items: center; gap: 6px; }
+  .task-item .dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
+  .task-item .st { font-size: 12px; color: var(--text-dim); }
+  .task-item .time { margin-left: auto; font-size: 11px; color: var(--text-dim); }
+  .task-item .goal {
+    margin-top: 2px; font-size: 12.5px; color: var(--text-dim);
+    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+  }
+
+  /* ── main ── */
+  main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+  #topbar {
+    display: flex; align-items: center; gap: 10px;
+    padding: 10px 18px; border-bottom: 1px solid var(--border); background: var(--panel);
+    min-height: 50px;
+  }
+  #goal {
+    flex: 1; min-width: 0; font-weight: 600;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  #open-chat {
+    font-size: 13px; padding: 4px 12px; border: 1px solid var(--border);
+    border-radius: 6px; color: var(--text-dim);
+  }
+  .badge {
+    flex: none; font-size: 12px; padding: 2px 10px; border-radius: 999px;
+    border: 1px solid var(--border); color: var(--text-dim);
+  }
+  .badge.QUEUED { color: var(--text-dim); }
+  .badge.RUNNING { color: var(--accent); border-color: var(--accent); }
+  .badge.PAUSED { color: var(--warn); border-color: var(--warn); }
+  .badge.COMPLETED { color: var(--ok); border-color: var(--ok); }
+  .badge.FAILED { color: var(--err); border-color: var(--err); }
+  .badge.CANCELLED { color: var(--muted); }
+
+  /* ── tabs ── */
+  #tabs {
+    display: flex; gap: 2px; padding: 0 18px; border-bottom: 1px solid var(--border);
+    background: var(--panel);
+  }
+  #tabs button {
+    padding: 9px 16px; border: none; background: transparent; color: var(--text-dim);
+    font-size: 13.5px; cursor: pointer; border-bottom: 2px solid transparent; margin-bottom: -1px;
+  }
+  #tabs button.active { color: var(--accent); border-bottom-color: var(--accent); font-weight: 600; }
+
+  #panes { flex: 1; overflow-y: auto; padding: 18px; }
+  .pane { display: none; max-width: 1080px; margin: 0 auto; }
+  .pane.active { display: block; }
+  .empty {
+    color: var(--text-dim); text-align: center; margin-top: 12vh; font-size: 14px;
+  }
+  .hint { color: var(--text-dim); font-size: 12.5px; margin-bottom: 14px; }
+
+  /* ── cards & sections ── */
+  .card {
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 12px; padding: 14px 16px; margin-bottom: 14px;
+  }
+  .card h3 { margin: 0 0 10px; font-size: 14px; }
+  .kv { display: grid; grid-template-columns: 140px 1fr; row-gap: 6px; column-gap: 12px; }
+  .kv .k { color: var(--text-dim); font-size: 12.5px; }
+  .kv .v { word-break: break-word; }
+
+  .stat-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 10px; }
+  .stat {
+    background: var(--code-bg); border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px;
+  }
+  .stat .label { font-size: 11.5px; color: var(--text-dim); }
+  .stat .value { font-size: 18px; font-weight: 600; margin-top: 2px; }
+  .stat .sub { font-size: 11px; color: var(--text-dim); }
+
+  /* ── runs ── */
+  .run-card { border-top: 1px dashed var(--border); padding: 10px 0; }
+  .run-card:first-of-type { border-top: none; }
+  .run-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .run-id { font-family: Consolas, Menlo, monospace; font-size: 12px; color: var(--muted); }
+  .run-meta { font-size: 12.5px; color: var(--text-dim); margin-top: 4px; }
+  .run-err { color: var(--err); font-size: 12.5px; margin-top: 6px; word-break: break-word; }
+  details.final { margin-top: 8px; }
+  details.final summary { cursor: pointer; font-size: 12.5px; color: var(--accent); user-select: none; }
+  details.final .final-body {
+    margin-top: 8px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px;
+    background: var(--code-bg); white-space: pre-wrap; word-break: break-word;
+  }
+
+  /* ── messages ── */
+  .thread { margin-bottom: 18px; }
+  .thread-title {
+    display: flex; align-items: center; gap: 8px; font-weight: 600; font-size: 13.5px; margin-bottom: 8px;
+  }
+  .thread-title .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent); flex: none; }
+  .thread-title .tid { font-size: 11px; color: var(--muted); font-family: Consolas, Menlo, monospace; font-weight: 400; }
+  .msg {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+    padding: 8px 12px; margin-bottom: 8px;
+  }
+  .msg-head { display: flex; align-items: center; gap: 6px; margin-bottom: 5px; flex-wrap: wrap; }
+  .role { font-size: 11px; padding: 1px 8px; border-radius: 999px; border: 1px solid var(--border); color: var(--text-dim); }
+  .role-human { color: var(--accent); border-color: var(--accent); }
+  .role-ai { color: var(--ok); border-color: var(--ok); }
+  .role-tool { color: var(--warn); border-color: var(--warn); }
+  .role-system { color: var(--muted); }
+  .tool-name { font-size: 11px; color: var(--text-dim); font-family: Consolas, Menlo, monospace; }
+  .seq { margin-left: auto; font-size: 11px; color: var(--muted); }
+  .content { white-space: pre-wrap; word-break: break-word; }
+  .content p { margin: 4px 0; }
+  details.think { margin: 4px 0; border: 1px dashed var(--border); border-radius: 8px; padding: 6px 10px; background: var(--code-bg); }
+  details.think summary { cursor: pointer; font-size: 12px; color: var(--text-dim); user-select: none; }
+  details.think .body { margin-top: 6px; color: var(--text-dim); font-size: 12.5px; white-space: pre-wrap; word-break: break-word; }
+  .calls { margin: 5px 0; }
+  .call { border: 1px solid var(--border); border-radius: 8px; padding: 6px 9px; margin-bottom: 5px; background: var(--code-bg); }
+  .call .cn { font-weight: 600; font-size: 12.5px; color: var(--accent); margin-right: 8px; }
+  .call code { font-size: 12px; color: var(--text-dim); word-break: break-all; }
+  .tool-result { border-top: 1px dashed var(--border); margin-top: 7px; padding-top: 7px; font-size: 12.5px; color: var(--text-dim); white-space: pre-wrap; word-break: break-word; }
+
+  /* ── evaluations ── */
+  .eval-head { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-bottom: 8px; }
+  .eval-stage { font-weight: 600; }
+  .eval-meta { font-size: 12px; color: var(--text-dim); }
+  .eval-score { margin-left: auto; font-weight: 600; }
+  .verdict { font-size: 12px; padding: 2px 10px; border-radius: 999px; border: 1px solid var(--border); font-weight: 600; }
+  .verdict-PASSED, .verdict-DEGRADED_PASS { color: var(--ok); border-color: var(--ok); }
+  .verdict-RETRY { color: var(--err); border-color: var(--err); }
+  .verdict-DEFEND { color: var(--warn); border-color: var(--warn); }
+  .eval-degraded { font-size: 11px; padding: 1px 8px; border-radius: 999px; border: 1px solid var(--warn); color: var(--warn); }
+  .eval-section { border-top: 1px dashed var(--border); padding: 9px 0; }
+  .eval-section:first-of-type { border-top: none; }
+  .eval-section-title { font-size: 13px; font-weight: 600; color: var(--text-dim); margin-bottom: 6px; }
+  .eval-list { margin: 4px 0; padding-left: 20px; }
+  .eval-list li { margin-bottom: 3px; }
+  .eval-table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+  .eval-table th, .eval-table td { text-align: left; vertical-align: top; padding: 5px 8px; border-bottom: 1px solid var(--border); }
+  .eval-table th { color: var(--text-dim); font-weight: 600; white-space: nowrap; }
+  .score { font-weight: 600; text-align: center; white-space: nowrap; }
+  .s-full { color: var(--ok); }
+  .s-half { color: var(--warn); }
+  .s-zero { color: var(--err); }
+  .reason { color: var(--text-dim); }
+
+  .ce-item { border: 1px solid var(--border); border-radius: 8px; padding: 8px 11px; margin-bottom: 8px; background: var(--code-bg); }
+  .ce-row { margin-bottom: 5px; display: flex; gap: 8px; align-items: baseline; }
+  .ce-k { flex: none; font-size: 11px; color: var(--text-dim); padding: 0 6px; border: 1px solid var(--border); border-radius: 4px; }
+  .ce-v { word-break: break-word; }
+  .ce-quote { margin: 2px 0; padding: 5px 9px; border-left: 2px solid var(--muted); color: var(--text-dim); font-size: 12.5px; white-space: pre-wrap; }
+  .ce-src { color: var(--accent); word-break: break-all; }
+  .ce-assess { font-size: 12px; color: var(--text-dim); margin-top: 4px; }
+  .ce-badge { display: inline-block; font-size: 11px; padding: 0 7px; border-radius: 999px; border: 1px solid var(--border); color: var(--text-dim); font-weight: 600; }
+  .ce-badge.s-high { color: var(--err); border-color: var(--err); }
+  .ce-badge.s-medium { color: var(--warn); border-color: var(--warn); }
+  .ce-badge.s-low { color: var(--text-dim); }
+  .ce-badge.invalid { color: var(--muted); text-decoration: line-through; }
+
+  /* ── events ── */
+  .ev { border-bottom: 1px solid var(--border); padding: 6px 2px; }
+  .ev-head { display: flex; align-items: center; gap: 8px; }
+  .ev-time { font-size: 11px; color: var(--muted); font-family: Consolas, Menlo, monospace; flex: none; }
+  .ev-type { font-size: 11.5px; padding: 1px 8px; border-radius: 999px; background: var(--code-bg); border: 1px solid var(--border); font-family: Consolas, Menlo, monospace; color: var(--accent); }
+  .ev-summary { font-size: 12.5px; color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
+  .ev details { margin-top: 4px; }
+  .ev details summary { cursor: pointer; font-size: 11.5px; color: var(--text-dim); user-select: none; }
+  .ev pre { margin: 6px 0 2px; max-height: 320px; overflow: auto; }
+</style>
+</head>
+<body>
+
+<aside id="sidebar">
+  <div class="side-head">
+    <a href="/">← 返回聊天</a>
+    <button id="refresh-list">刷新</button>
+  </div>
+  <div id="task-list"></div>
+</aside>
+
+<main>
+  <header id="topbar">
+    <div id="goal">Agent 运行看板 — 选择左侧任务</div>
+    <span id="status-badge" class="badge" style="display:none"></span>
+    <a id="open-chat" href="/" target="_blank" rel="noopener">在聊天中打开</a>
+  </header>
+
+  <nav id="tabs">
+    <button data-tab="overview" class="active">概览</button>
+    <button data-tab="messages">消息</button>
+    <button data-tab="evaluations">评估</button>
+    <button data-tab="events">事件流</button>
+  </nav>
+
+  <div id="panes">
+    <section id="pane-overview" class="pane active"></section>
+    <section id="pane-messages" class="pane"></section>
+    <section id="pane-evaluations" class="pane"></section>
+    <section id="pane-events" class="pane"></section>
+  </div>
+</main>
+
+<script>
+"use strict";
+
+const API = "/api/v1";
+const $ = (id) => document.getElementById(id);
+
+const STATUS_LABEL = {
+  CREATED: "已创建", QUEUED: "排队中", RUNNING: "执行中", PAUSED: "待审批",
+  COMPLETED: "已完成", FAILED: "失败", CANCELLED: "已取消",
+};
+const DOT_COLOR = {
+  QUEUED: "var(--muted)", RUNNING: "var(--accent)", PAUSED: "var(--warn)",
+  COMPLETED: "var(--ok)", FAILED: "var(--err)", CANCELLED: "var(--muted)",
+  CREATED: "var(--muted)",
+};
+const ACTIVE_STATES = new Set(["CREATED", "QUEUED", "RUNNING", "PAUSED"]);
+const ROLE_LABEL = { human: "用户", ai: "AI", tool: "工具", system: "系统" };
+const RUN_STATUS_LABEL = {
+  PENDING: "待执行", RUNNING: "执行中", COMPLETED: "已完成", FAILED: "失败", CANCELLED: "已取消",
+};
+const EVAL_STATUS_LABEL = { PASSED: "通过", RETRY: "需重试", DEFEND: "待辩护", DEGRADED_PASS: "降级通过" };
+const STRENGTH_LABEL = { high: "强", medium: "中", low: "弱", invalid: "判废" };
+const TIMELINESS_LABEL = { high: "高", medium: "中", low: "低" };
+const CONFLICT_LABEL = { direct: "直接对立", perspective: "视角差异" };
+const LOGIC_LABEL = { high: "强", medium: "中", low: "弱" };
+
+const state = {
+  tasks: [],
+  currentId: null,
+  currentTask: null,
+  status: null,
+  es: null,
+  seen: new Set(),
+  activeTab: "overview",
+  refreshTimer: null,
+};
+
+/* ── utils ── */
+
+function esc(s) {
+  return String(s ?? "").replace(/[&<>"']/g,
+    (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+
+function fmtTime(iso) {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  if (isNaN(d)) return "—";
+  return `${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")} ${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}:${String(d.getSeconds()).padStart(2, "0")}`;
+}
+
+function fmtDuration(startIso, endIso) {
+  if (!startIso) return "";
+  const a = new Date(startIso), b = endIso ? new Date(endIso) : new Date();
+  if (isNaN(a) || isNaN(b)) return "";
+  const s = Math.max(0, Math.round((b - a) / 1000));
+  if (s < 60) return `${s}s`;
+  return `${Math.floor(s / 60)}m${s % 60}s`;
+}
+
+function fmtElapsedMs(ms) {
+  if (ms == null) return "—";
+  const s = Math.round(ms / 1000);
+  if (s < 60) return `${s}s`;
+  return `${Math.floor(s / 60)}m${s % 60}s`;
+}
+
+function md(text) {
+  const fences = [];
+  let t = esc(text ?? "").replace(/```(\w*)\n([\s\S]*?)```/g, (_, lang, code) => {
+    fences.push(`<pre><code>${code}</code></pre>`);
+    return ` F${fences.length - 1} `;
+  });
+  const lines = t.split("\n");
+  const out = [];
+  let list = null;
+  const closeList = () => { if (list) { out.push(`</${list}>`); list = null; } };
+  for (const raw of lines) {
+    const line = raw.trimEnd();
+    const h = line.match(/^(#{1,4})\s+(.*)/);
+    const ul = line.match(/^[-*]\s+(.*)/);
+    const ol = line.match(/^\d+[.、]\s+(.*)/);
+    if (h) { closeList(); out.push(`<h${h[1].length}>${h[2]}</h${h[1].length}>`); }
+    else if (ul) { if (list !== "ul") { closeList(); out.push("<ul>"); list = "ul"; } out.push(`<li>${ul[1]}</li>`); }
+    else if (ol) { if (list !== "ol") { closeList(); out.push("<ol>"); list = "ol"; } out.push(`<li>${ol[1]}</li>`); }
+    else if (!line.trim()) { closeList(); }
+    else { closeList(); out.push(`<p>${line}</p>`); }
+  }
+  closeList();
+  t = out.join("\n").replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
+                   .replace(/`([^`]+)`/g, "<code>$1</code>");
+  return t.replace(/ F(\d+) /g, (_, i) => fences[+i]);
+}
+
+async function api(path) {
+  const res = await fetch(API + path);
+  if (!res.ok) throw new Error(`${res.status} ${await res.text()}`);
+  return res.json();
+}
+
+function setStatus(status) {
+  state.status = status;
+  const badge = $("status-badge");
+  badge.style.display = "";
+  badge.textContent = STATUS_LABEL[status] || status;
+  badge.className = `badge ${status}`;
+}
+
+/* ── sidebar ── */
+
+async function loadTasks() {
+  try {
+    state.tasks = await api("/tasks?limit=100");
+    renderTaskList();
+  } catch (e) { /* 静默 */ }
+}
+
+function renderTaskList() {
+  const box = $("task-list");
+  box.innerHTML = "";
+  for (const t of state.tasks) {
+    const el = document.createElement("div");
+    el.className = "task-item" + (t.id === state.currentId ? " active" : "");
+    el.dataset.id = t.id;
+    el.innerHTML = `
+      <div class="row1">
+        <span class="dot" style="background:${DOT_COLOR[t.status] || "var(--muted)"}"></span>
+        <span class="st">${STATUS_LABEL[t.status] || t.status}</span>
+        <span class="time">${fmtTime(t.updated_at)}</span>
+      </div>
+      <div class="goal">${esc(t.goal)}</div>`;
+    el.onclick = () => openTask(t.id);
+    box.appendChild(el);
+  }
+}
+
+/* ── tab switching ── */
+
+$("tabs").addEventListener("click", (e) => {
+  const btn = e.target.closest("button[data-tab]");
+  if (!btn) return;
+  state.activeTab = btn.dataset.tab;
+  document.querySelectorAll("#tabs button").forEach((b) => b.classList.toggle("active", b === btn));
+  document.querySelectorAll(".pane").forEach((p) => p.classList.toggle("active", p.id === `pane-${state.activeTab}`));
+  if (state.currentId) refreshActive();
+});
+
+/* ── data loading / rendering ── */
+
+async function openTask(id) {
+  closeStream();
+  state.currentId = id;
+  state.seen = new Set();
+  document.querySelectorAll(".task-item").forEach((el) =>
+    el.classList.toggle("active", el.dataset.id === id));
+
+  try {
+    state.currentTask = await api(`/tasks/${id}`);
+    setStatus(state.currentTask.status);
+    $("goal").textContent = state.currentTask.goal;
+    await Promise.all([
+      loadOverview(),
+      loadMessages(),
+      loadEvaluations(),
+      loadEvents(),
+    ]);
+    if (ACTIVE_STATES.has(state.currentTask.status)) openStream(id);
+  } catch (e) {
+    showEmpty("overview", `加载任务失败：${esc(e.message)}`);
+  }
+}
+
+function showEmpty(pane, text) {
+  const el = $(`pane-${pane}`);
+  el.innerHTML = `<div class="empty">${text}</div>`;
+}
+
+/* ── overview ── */
+
+async function loadOverview() {
+  const t = state.currentTask;
+  const pane = $("pane-overview");
+
+  let budgetHtml = "";
+  try {
+    const b = await api(`/tasks/${t.id}/budget`);
+    budgetHtml = `
+      <div class="stat-grid">
+        <div class="stat"><div class="label">输入 tokens</div><div class="value">${b.input_tokens.toLocaleString()}</div></div>
+        <div class="stat"><div class="label">输出 tokens</div><div class="value">${b.output_tokens.toLocaleString()}</div></div>
+        <div class="stat"><div class="label">工具调用</div><div class="value">${b.tool_calls}</div></div>
+        <div class="stat"><div class="label">耗时</div><div class="value">${fmtElapsedMs(b.elapsed_ms)}</div></div>
+        <div class="stat"><div class="label">估算成本</div><div class="value">$${Number(b.estimated_cost).toFixed(4)}</div></div>
+      </div>`;
+  } catch {
+    budgetHtml = `<div class="hint">暂无预算用量（任务可能尚未开始执行）。</div>`;
+  }
+
+  let runsHtml;
+  try {
+    const runs = await api(`/tasks/${t.id}/runs`);
+    runsHtml = runs.length
+      ? runs.map(runCardHTML).join("")
+      : `<div class="hint">暂无执行记录。</div>`;
+  } catch (e) {
+    runsHtml = `<div class="hint">加载执行记录失败：${esc(e.message)}</div>`;
+  }
+
+  pane.innerHTML = `
+    <div class="card">
+      <h3>任务信息</h3>
+      <div class="kv">
+        <span class="k">任务 ID</span><span class="v"><code>${esc(t.id)}</code></span>
+        <span class="k">目标</span><span class="v">${esc(t.goal)}</span>
+        <span class="k">状态</span><span class="v">${STATUS_LABEL[t.status] || t.status}</span>
+        <span class="k">优先级</span><span class="v">${t.priority}</span>
+        <span class="k">搜索深度</span><span class="v">${esc(t.search_depth)}</span>
+        <span class="k">输出格式</span><span class="v">${esc(t.output_format)}</span>
+        <span class="k">预算</span><span class="v">${t.budget_tokens.toLocaleString()} tokens · ${t.budget_seconds}s · $${t.budget_cost}</span>
+        <span class="k">创建时间</span><span class="v">${fmtTime(t.created_at)}</span>
+        <span class="k">更新时间</span><span class="v">${fmtTime(t.updated_at)}</span>
+      </div>
+    </div>
+    <div class="card">
+      <h3>预算用量</h3>
+      ${budgetHtml}
+    </div>
+    <div class="card">
+      <h3>执行记录（${t.current_run_id ? "最近 " : ""}每次 agent_run）</h3>
+      ${runsHtml}
+    </div>`;
+}
+
+function runCardHTML(r) {
+  const final = r.final_output
+    ? `<details class="final"><summary>查看最终输出</summary><div class="final-body">${md(r.final_output)}</div></details>`
+    : "";
+  const err = r.error_message
+    ? `<div class="run-err">错误：${esc(r.error_message)}</div>` : "";
+  return `<div class="run-card">
+    <div class="run-head">
+      <span class="badge ${r.status}">${RUN_STATUS_LABEL[r.status] || r.status}</span>
+      <span class="run-id">${esc(r.id)}</span>
+      ${r.retry_count ? `<span class="run-meta">重试 ${r.retry_count}</span>` : ""}
+    </div>
+    <div class="run-meta">开始 ${fmtTime(r.started_at)} · 结束 ${fmtTime(r.ended_at)} · 耗时 ${fmtDuration(r.started_at, r.ended_at)}</div>
+    ${err}${final}
+  </div>`;
+}
+
+/* ── messages ── */
+
+async function loadMessages() {
+  const pane = $("pane-messages");
+  try {
+    const threads = await api(`/tasks/${state.currentId}/messages`);
+    if (!threads.length) {
+      pane.innerHTML = `<div class="empty">暂无对话记录：任务可能尚未执行，或未产生消息。</div>`;
+      return;
+    }
+    pane.innerHTML = threads.map(threadHTML).join("");
+  } catch (e) {
+    pane.innerHTML = `<div class="empty">加载消息失败：${esc(e.message)}</div>`;
+  }
+}
+
+function threadHTML(thread) {
+  const label = thread.stage_index == null ? "主流程" : `阶段 ${thread.stage_index + 1}`;
+  const msgs = (thread.messages || []).map(msgHTML).join("");
+  return `<div class="thread">
+    <div class="thread-title"><span class="dot"></span>${esc(label)}<span class="tid">${esc(thread.thread_id)}</span></div>
+    ${msgs}
+  </div>`;
+}
+
+function msgHTML(m) {
+  let body = "";
+  if (m.reasoning_content) {
+    body += `<details class="think"><summary>💭 思考过程</summary><div class="body">${md(m.reasoning_content)}</div></details>`;
+  }
+  if (m.tool_calls && m.tool_calls.length) {
+    body += `<div class="calls">${m.tool_calls.map((c) =>
+      `<div class="call"><span class="cn">🔧 ${esc(c.name)}</span><code>${esc(typeof c.args === "string" ? c.args : JSON.stringify(c.args))}</code></div>`
+    ).join("")}</div>`;
+  }
+  let content = "";
+  if (m.role === "tool") {
+    content = `<div class="tool-result">${md(m.content)}</div>`;
+  } else if (m.content) {
+    content = `<div class="content">${md(m.content)}</div>`;
+  }
+  const toolName = m.tool_name ? `<span class="tool-name">${esc(m.tool_name)}</span>` : "";
+  return `<div class="msg">
+    <div class="msg-head">
+      <span class="role role-${esc(m.role)}">${ROLE_LABEL[m.role] || m.role}</span>
+      ${toolName}
+      <span class="seq">#${m.seq}</span>
+    </div>
+    ${body}${content}
+  </div>`;
+}
+
+/* ── evaluations ── */
+
+async function loadEvaluations() {
+  const pane = $("pane-evaluations");
+  try {
+    const evals = await api(`/tasks/${state.currentId}/evaluations`);
+    if (!evals.length) {
+      pane.innerHTML = `<div class="empty">暂无评估记录：任务尚未通过评估阶段。</div>`;
+      return;
+    }
+    pane.innerHTML = evals.map(evalCardHTML).join("");
+  } catch (e) {
+    pane.innerHTML = `<div class="empty">加载评估失败：${esc(e.message)}</div>`;
+  }
+}
+
+function scoreTone(s) {
+  if (s == null) return "";
+  if (s >= 0.999) return "s-full";
+  if (s >= 0.5) return "s-half";
+  return "s-zero";
+}
+function relevanceTone(s) {
+  if (s >= 0.7) return "s-full";
+  if (s >= 0.4) return "s-half";
+  return "s-zero";
+}
+function ceStrength(a) {
+  if (!a || !a.valid) return "invalid";
+  if (a.timeliness === "low" || a.logic === "low") return "low";
+  if (a.conflict === "perspective") return "medium";
+  if (a.timeliness === "high" && a.logic === "high") return "high";
+  return "medium";
+}
+
+function ceItemHTML(ce, a) {
+  const parts = [];
+  if (ce.claim) parts.push(`<div class="ce-row"><span class="ce-k">结论</span><span class="ce-v">${esc(ce.claim)}</span></div>`);
+  if (ce.counter_evidence) parts.push(`<div class="ce-row"><span class="ce-k">反例事实</span><span class="ce-v">${esc(ce.counter_evidence)}</span></div>`);
+  if (ce.quote) parts.push(`<div class="ce-row"><span class="ce-k">证据原文</span><blockquote class="ce-quote">${esc(ce.quote)}</blockquote></div>`);
+  if (ce.source_url) parts.push(`<div class="ce-row"><span class="ce-k">来源</span><a class="ce-src" href="${esc(ce.source_url)}" target="_blank" rel="noopener">${esc(ce.source_url)}</a></div>`);
+  if (ce.date) parts.push(`<div class="ce-row"><span class="ce-k">日期</span><span class="ce-v">${esc(ce.date)}</span></div>`);
+  if (a) {
+    const strength = ceStrength(a);
+    const tags = [];
+    if (a.valid === false) {
+      tags.push(`<span class="ce-badge invalid">判废</span>`);
+    } else {
+      tags.push(`<span class="ce-badge s-${strength}">强度 ${STRENGTH_LABEL[strength] || strength}</span>`);
+      if (a.timeliness) tags.push(`时效 ${TIMELINESS_LABEL[a.timeliness] || a.timeliness}`);
+      if (a.conflict) tags.push(`${CONFLICT_LABEL[a.conflict] || a.conflict}`);
+      if (a.logic) tags.push(`逻辑 ${LOGIC_LABEL[a.logic] || a.logic}`);
+    }
+    if (a.reason) tags.push(`<span class="reason">${esc(a.reason)}</span>`);
+    parts.push(`<div class="ce-assess">${tags.join(" · ")}</div>`);
+  }
+  return `<div class="ce-item">${parts.join("")}</div>`;
+}
+
+function evalCardHTML(ev) {
+  const status = ev.status || "";
+  const v = EVAL_STATUS_LABEL[status] || status;
+  const attempt = ev.attempt || 1;
+  const defenseRound = ev.defense_round || 0;
+  const weighted = ev.weighted_score != null ? Number(ev.weighted_score).toFixed(2) : null;
+  const attemptLabel = defenseRound > 0
+    ? `辩护第 ${defenseRound} 轮` : (attempt > 1 ? `第 ${attempt} 次尝试` : "");
+
+  let sections = "";
+
+  const violations = (ev.phase1 && ev.phase1.violations) || [];
+  if (violations.length) {
+    sections += `<div class="eval-section"><div class="eval-section-title">规则评估 · 违规（零 LLM 短路）</div>
+      <ul class="eval-list">${violations.map((x) => `<li>${esc(x)}</li>`).join("")}</ul></div>`;
+  }
+
+  const fwd = (ev.phase2 && ev.phase2.forward) || null;
+  if (fwd) {
+    sections += `<div class="eval-section"><div class="eval-section-title">正向审计 · 结论 ↔ 证据相关性</div>
+      <div class="kv"><span class="k">相关性</span><span class="v">${esc(fwd.logical_relevance || "—")}</span></div>
+      <div class="kv"><span class="k">理由</span><span class="v">${esc(fwd.reason || "—")}</span></div>
+      ${(fwd.unsupported || []).length ? `<div class="kv"><span class="k">无凭据断言</span><span class="v">${(fwd.unsupported || []).map((u) => esc(u)).join("；")}</span></div>` : ""}
+      </div>`;
+  }
+
+  const rev = (ev.phase2 && ev.phase2.reverse) || null;
+  if (rev) {
+    const ces = rev.counterexamples || [];
+    const assessments = rev.assessments || [];
+    if (ces.length) {
+      const tierLabel = rev.tier ? STRENGTH_LABEL[rev.tier] || rev.tier : "";
+      const items = ces.map((ce, i) => ceItemHTML(ce, assessments[i])).join("");
+      sections += `<div class="eval-section"><div class="eval-section-title">真相核查 · 事实反例${tierLabel ? `（综合强度：${esc(tierLabel)}）` : ""}${rev.defended ? " · 已辩护" : ""}</div>
+        ${items}</div>`;
+    }
+  }
+
+  const crits = (ev.phase3 && ev.phase3.criteria_scores) || [];
+  if (crits.length) {
+    const rows = crits.map((c) => `
+      <tr>
+        <td>${esc(c.dimension)}</td>
+        <td>${esc(c.criteria)}</td>
+        <td>${c.weight != null ? Number(c.weight).toFixed(2) : ""}</td>
+        <td class="score ${scoreTone(c.score)}">${c.score == null ? "—" : Number(c.score).toFixed(2)}</td>
+        <td class="reason">${esc(c.comment)}</td>
+      </tr>`).join("");
+    sections += `<div class="eval-section"><div class="eval-section-title">加权打分</div>
+      <table class="eval-table"><thead><tr><th>维度</th><th>标准</th><th>权重</th><th>得分</th><th>评语</th></tr></thead>
+      <tbody>${rows}</tbody></table></div>`;
+  }
+
+  const feedback = ev.feedback || [];
+  if (feedback.length) {
+    sections += `<div class="eval-section"><div class="eval-section-title">反馈</div>
+      <ul class="eval-list">${feedback.map((x) => `<li>${esc(x)}</li>`).join("")}</ul></div>`;
+  }
+
+  return `<div class="card">
+    <div class="eval-head">
+      <span class="eval-stage">阶段 ${ev.stage_index + 1} 评估</span>
+      ${attemptLabel ? `<span class="eval-meta">${esc(attemptLabel)}</span>` : ""}
+      <span class="verdict verdict-${status}">${esc(v)}</span>
+      ${status === "DEGRADED_PASS" ? `<span class="eval-degraded">评估降级</span>` : ""}
+      ${weighted != null ? `<span class="eval-score">评分 ${weighted}</span>` : ""}
+      <span class="eval-meta">${fmtTime(ev.created_at)}</span>
+    </div>${sections}
+  </div>`;
+}
+
+/* ── events ── */
+
+async function loadEvents() {
+  const pane = $("pane-events");
+  try {
+    const events = await api(`/tasks/${state.currentId}/events?limit=1000`);
+    pane.innerHTML = "";
+    for (const ev of events) {
+      if (ev.id != null) state.seen.add(ev.id);
+      pane.appendChild(eventRow(ev));
+    }
+    if (!events.length) {
+      pane.innerHTML = `<div class="empty">暂无事件。</div>`;
+    }
+  } catch (e) {
+    pane.innerHTML = `<div class="empty">加载事件失败：${esc(e.message)}</div>`;
+  }
+}
+
+function eventRow(ev) {
+  const row = document.createElement("div");
+  row.className = "ev";
+  const summary = typeof ev.payload === "object" ? summarize(ev.payload) : esc(ev.payload);
+  row.innerHTML = `
+    <div class="ev-head">
+      <span class="ev-time">${fmtTime(ev.timestamp)}</span>
+      <span class="ev-type">${esc(ev.type)}</span>
+      <span class="ev-summary">${summary}</span>
+    </div>
+    <details><summary>payload</summary><pre>${esc(JSON.stringify(ev.payload ?? {}, null, 2))}</pre></details>`;
+  return row;
+}
+
+function summarize(p) {
+  if (p.result_preview) return esc(String(p.result_preview).slice(0, 80) + "…");
+  if (p.objective) return esc(String(p.objective));
+  if (p.node) return esc(`node=${p.node}`);
+  if (p.error) return esc(String(p.error));
+  if (p.purpose) return esc(`purpose=${p.purpose}`);
+  return "";
+}
+
+function appendEvent(ev) {
+  const pane = $("pane-events");
+  const empty = pane.querySelector(".empty");
+  if (empty) empty.remove();
+  pane.appendChild(eventRow(ev));
+  // keep the log bounded in the DOM
+  while (pane.children.length > 500) pane.removeChild(pane.firstElementChild);
+}
+
+/* ── SSE + live refresh ── */
+
+const SSE_TYPES = [
+  "task.created", "agent_run.started", "plan.generated", "task.awaiting_approval",
+  "plan.approved", "plan.rejected", "stage.started", "stage.evaluated",
+  "stage.defended", "stage.completed", "graph.step", "react.step",
+  "model_call.started", "model_call.completed", "agent_run.completed",
+  "task.completed", "task.failed", "task.budget_exceeded",
+  "task.cancelled", "task.cancel_requested", "ping",
+  "stream.started", "token", "stream.ended", "tool.started", "tool.completed",
+];
+
+// events whose arrival means durable data (messages / evaluations / runs / budget)
+// has changed and the active pane should be re-fetched.
+const REFRESH_TYPES = new Set([
+  "agent_run.started", "stage.evaluated", "stage.defended", "stage.completed",
+  "react.step", "graph.step", "model_call.completed", "tool.completed",
+  "agent_run.completed", "task.completed", "task.failed",
+  "task.budget_exceeded", "task.cancelled", "plan.approved",
+]);
+
+function closeStream() {
+  if (state.es) { state.es.close(); state.es = null; }
+}
+
+function openStream(taskId) {
+  closeStream();
+  const es = new EventSource(`${API}/tasks/${taskId}/stream`);
+  state.es = es;
+  for (const type of SSE_TYPES) {
+    es.addEventListener(type, (e) => {
+      let ev;
+      try { ev = JSON.parse(e.data); } catch { return; }
+      onEvent(ev);
+    });
+  }
+  es.onerror = () => {
+    if (es.readyState === EventSource.CLOSED && state.currentId === taskId &&
+        ACTIVE_STATES.has(state.status)) {
+      setTimeout(() => { if (state.currentId === taskId) openStream(taskId); }, 3000);
+    }
+  };
+}
+
+function onEvent(ev) {
+  if (!ev || ev.type === "ping") return;
+  if (ev.id != null) {
+    if (state.seen.has(ev.id)) return;
+    state.seen.add(ev.id);
+  }
+  appendEvent(ev);
+  if (REFRESH_TYPES.has(ev.type)) scheduleRefresh();
+  if (ev.type === "task.completed") { setStatus("COMPLETED"); closeStream(); loadTasks(); }
+  if (ev.type === "task.failed" || ev.type === "task.budget_exceeded") { setStatus("FAILED"); closeStream(); loadTasks(); }
+  if (ev.type === "task.cancelled") { setStatus("CANCELLED"); closeStream(); loadTasks(); }
+  if (ev.type === "task.awaiting_approval") setStatus("PAUSED");
+}
+
+function scheduleRefresh() {
+  if (state.refreshTimer) return;
+  state.refreshTimer = setTimeout(() => {
+    state.refreshTimer = null;
+    refreshActive();
+  }, 300);
+}
+
+async function refreshActive() {
+  if (!state.currentId) return;
+  const id = state.currentId;
+  // keep header in sync even if only the event stream changed
+  try {
+    const t = await api(`/tasks/${id}`);
+    state.currentTask = t;
+    setStatus(t.status);
+  } catch { /* 静默 */ }
+  const loader = {
+    overview: loadOverview,
+    messages: loadMessages,
+    evaluations: loadEvaluations,
+    events: () => Promise.resolve(),
+  };
+  try { await loader[state.activeTab](); } catch { /* 静默 */ }
+}
+
+/* ── boot ── */
+
+$("refresh-list").onclick = loadTasks;
+loadTasks();
+</script>
+</body>
+</html>

@@ -7,7 +7,6 @@ from enum import Enum
 
 from app.storage.redis.client import redis_client
 
-
 BUDGET_KEY = "task:{task_id}:budget"
 
 

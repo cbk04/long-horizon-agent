@@ -1,10 +1,14 @@
-"""ORM models for the 6 core tables: task, agent_run, step, evidence, artifact, task_budget_usage."""
+"""ORM models for the core tables.
+
+task, agent_run, step, evidence, artifact, task_budget_usage, task_event,
+stage_evaluation, agent_message.
+"""
 
 from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import BigInteger, DateTime, Enum, Float, Integer, String, Text
+from sqlalchemy import JSON, BigInteger, DateTime, Enum, Float, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.sql import func
 
@@ -72,6 +76,8 @@ class AgentRun(Base):
     checkpoint_ref: Mapped[str | None] = mapped_column(String(256), nullable=True)
     retry_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Full final answer text, written by the worker on task completion
+    final_output: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
 
@@ -113,6 +119,12 @@ class Evidence(Base):
     content_ref: Mapped[str | None] = mapped_column(Text, nullable=True)
     claim_id: Mapped[str | None] = mapped_column(String(64), index=True, nullable=True)
     quality_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # Stage-handoff fields: which stage harvested this evidence, plus a cheap
+    # summary for the index and the extracted content for on-demand retrieval.
+    run_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    stage_index: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    content: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
 
 
@@ -146,3 +158,94 @@ class TaskBudgetUsage(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, server_default=func.now(), onupdate=func.now(), nullable=False
     )
+
+
+class StageEvaluation(Base):
+    """StageEvaluation — one evaluator pass over one stage (three-phase pipeline).
+
+    Every evaluate-node run writes a row: full pipeline, rule short-circuit,
+    DEFEND verdict, or post-defense re-adjudication. ``acceptance_snapshot``
+    freezes the acceptance list (with weights) used at scoring time, since the
+    plan itself only lives in the event stream.
+    """
+
+    __tablename__: str = "stage_evaluation"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    task_id: Mapped[str] = mapped_column(String(64), index=True, nullable=False)
+    run_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    stage_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    attempt: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    defense_round: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    status: Mapped[str] = mapped_column(
+        Enum("PASSED", "RETRY", "DEFEND", "DEGRADED_PASS", name="stage_eval_status"),
+        nullable=False,
+    )
+    rule_result: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    forward_result: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    reverse_result: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    criteria_scores: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    weighted_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    feedback: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    acceptance_snapshot: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+
+
+class StageOutput(Base):
+    """StageOutput — the accepted output of one completed stage.
+
+    One row per stage that advanced (the conclusion + its distilled findings +
+    evidence index). The stage's ReAct subgraph runs on its own thread and cannot
+    read the outer graph's ``AgentState``, so this durable copy is what the
+    retrieval tools (``list_prior_outputs`` / ``get_stage_output``) query — the
+    safety net when the planner under-declared a ``depends_on``.
+    """
+
+    __tablename__: str = "stage_output"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    task_id: Mapped[str] = mapped_column(String(64), index=True, nullable=False)
+    run_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    stage_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    objective: Mapped[str] = mapped_column(Text, nullable=False)
+    conclusion: Mapped[str] = mapped_column(Text, nullable=False)
+    key_findings: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    evidence_index: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+
+
+class AgentMessage(Base):
+    """AgentMessage — one conversation message of a react thread, queryable.
+
+    Business-level persistence of the agent's conversation, written by the
+    ``MessagePersistenceMiddleware`` after each model call (side-channel: the
+    checkpoint remains the execution source of truth; rows here exist so the
+    frontend / audit can read the dialogue without parsing checkpoint blobs).
+    Dedup key is the LangChain message id — re-persisting a thread is a no-op.
+    """
+
+    __tablename__: str = "agent_message"
+
+    id: Mapped[int] = mapped_column(
+        # INTEGER variant only so SQLite tests can autoincrement; MySQL DDL stays BIGINT
+        BigInteger().with_variant(Integer(), "sqlite"),
+        primary_key=True,
+        autoincrement=True,
+    )
+    task_id: Mapped[str] = mapped_column(String(64), index=True, nullable=False)
+    run_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    thread_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    # Position of the message within its thread (index in the state's message list)
+    seq: Mapped[int] = mapped_column(Integer, nullable=False)
+    # LangChain message id — unique per message, stable across re-invocations
+    message_id: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
+    # human | ai | tool | system
+    role: Mapped[str] = mapped_column(String(16), nullable=False)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    # Model chain-of-thought (additional_kwargs["reasoning_content"]) when the backend emits it
+    reasoning_content: Mapped[str | None] = mapped_column(Text, nullable=True)
+    tool_name: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    tool_call_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    tool_calls: Mapped[list | None] = mapped_column(JSON, nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
